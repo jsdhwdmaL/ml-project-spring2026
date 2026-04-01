@@ -17,6 +17,19 @@ Per-episode NPZ keys include:
 - is_human_intervention: (N,)
 - is_pure_teleop: (N,)
 - env_seed, trial_idx, success (episode-level scalars)
+
+Usage:
+# Chunked episodes
+python scripts/collect_teleop_data.py \
+    --output_dir ./teleop_data_chunked \
+    --num_seeds 10 \
+    --chunk_size 8
+
+# Non-chunked episodes (action chunks of size 1)
+python scripts/collect_teleop_data.py \
+    --output_dir ./teleop_data_non_chunked \
+    --num_seeds 10 \
+    --chunk_size 1
 """
 
 import warnings

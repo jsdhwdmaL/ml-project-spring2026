@@ -17,6 +17,10 @@ Expected per-episode schema:
   env_seed: scalar int64
   trial_idx: scalar int64
   success: scalar bool
+
+Usage:
+python scripts/validate_episode_schema.py \
+    --input path/to/episode.npz
 """
 
 import argparse

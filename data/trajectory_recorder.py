@@ -1,4 +1,4 @@
-"""Trajectory recorder for human intervention data collection.
+"""Trajectory recorder for human data collection.
 Records raw trajectory data during episode execution and builds action chunks.
 """
 
