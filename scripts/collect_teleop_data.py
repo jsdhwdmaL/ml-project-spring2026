@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+# Use Python 3.11 for this whole thing, suggest creating a venv or conda env with python=3.11
+# need pymunk version < 7.0.0 for gym_pusht compatibility
+# pip uninstall -y pymunk && pip install "pymunk<7"
 """Collect pure human teleoperation data in PushT with unified chunked schema.
 
 This script records raw per-step transitions and builds fixed-size action chunks
