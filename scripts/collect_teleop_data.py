@@ -217,6 +217,8 @@ def main(_):
     step_pbar = tqdm(total=FLAGS.max_steps, desc="Steps", position=1, leave=False)
 
     trial_idx = 0
+    saved_success_count = 0
+    skipped_failure_count = 0
     for current_seed in seed_list:
         step_pbar.set_description(f"Seed {current_seed} T{trial_idx} (pure_teleop)")
 
@@ -236,38 +238,45 @@ def main(_):
             step_pbar.close()
             seed_pbar.close()
             print("\nQuit requested. Exiting...")
+            print(f"Saved successful episodes: {saved_success_count}")
+            print(f"Skipped failed episodes: {skipped_failure_count}")
             env.close()
             return
 
-        data = recorder.finalize(
-            env_seed=current_seed,
-            trial_idx=trial_idx,
-            policy_seed=-1,
-            terminated=terminated,
-            truncated=truncated,
-            success=success,
-            is_pure_teleop_episode=True,
-        )
+        if success:
+            data = recorder.finalize(
+                env_seed=current_seed,
+                trial_idx=trial_idx,
+                policy_seed=-1,
+                terminated=terminated,
+                truncated=truncated,
+                success=success,
+                is_pure_teleop_episode=True,
+            )
 
-        saver.save(
-            data=data,
-            images=recorder.get_images(),
-            env_seed=current_seed,
-            trial_idx=trial_idx,
-            success=success,
-            had_intervention=True,
-            is_pure_teleop=True,
-            save_images=FLAGS.save_images,
-        )
-
-        status = "SUCCESS" if success else "FAIL"
-        seed_pbar.set_postfix_str(f"Last: {status}")
+            saver.save(
+                data=data,
+                images=recorder.get_images(),
+                env_seed=current_seed,
+                trial_idx=trial_idx,
+                success=success,
+                had_intervention=True,
+                is_pure_teleop=True,
+                save_images=FLAGS.save_images,
+            )
+            saved_success_count += 1
+            seed_pbar.set_postfix_str("Last: SUCCESS")
+        else:
+            skipped_failure_count += 1
+            seed_pbar.set_postfix_str("Last: FAIL (skipped)")
         seed_pbar.update(1)
 
     step_pbar.close()
     seed_pbar.close()
 
     print(f"\nCollection complete! Seeds processed: {len(seed_list)}")
+    print(f"Saved successful episodes: {saved_success_count}")
+    print(f"Skipped failed episodes: {skipped_failure_count}")
     print(f"Output: {FLAGS.output_dir}")
     env.close()
 

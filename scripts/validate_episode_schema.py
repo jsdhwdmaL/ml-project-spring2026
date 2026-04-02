@@ -20,7 +20,7 @@ Expected per-episode schema:
 
 Usage:
 python scripts/validate_episode_schema.py \
-    --input path/to/episode.npz
+    --input /Users/jojoli/Documents/CMU/Sophomore/S26/10701/project/ml-project-spring2026/data/pretraining/teleop_data_non_chunked/pure_teleop/env_seed_0_trial_0_20260401_202122_989512_images.npz
 """
 
 import argparse
