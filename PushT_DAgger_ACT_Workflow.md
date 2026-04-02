@@ -12,6 +12,7 @@ We will be training two baseline policies that we reimplement from scratch (usin
 - For DAgger/BC: Record (state, action) pairs.
 - For ACT/Chunked BC: Record (state, action_chunk) pairs (i.e., sequences of actions per chunk).
 - If using an existing dataset (e.g., LeRobot), ensure data compatibility (observation/action format, environment domain).
+- If using both human intervention and pure teleoperation data, merge them using npz_builder.py and train once. We probably won't do this though.
 
 ### 1.2. Data Format
 - Save data as `.npz` or similar, with arrays for observations, actions (or action chunks), rewards, and done flags.

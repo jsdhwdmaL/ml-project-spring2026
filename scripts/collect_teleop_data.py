@@ -21,21 +21,27 @@ Per-episode NPZ keys include:
 Usage:
 # Chunked episodes
 python scripts/collect_teleop_data.py \
-    --output_dir ./teleop_data_chunked \
+    --output_dir data/pretraining/teleop_data_chunked \
     --num_seeds 10 \
     --chunk_size 8
 
 # Non-chunked episodes (action chunks of size 1)
 python scripts/collect_teleop_data.py \
-    --output_dir ./teleop_data_non_chunked \
+    --output_dir data/pretraining/teleop_data_non_chunked \
     --num_seeds 10 \
     --chunk_size 1
 """
 
+import os
+import sys
 import warnings
 from typing import Dict, Optional
 
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 import numpy as np
 import gymnasium as gym
@@ -44,7 +50,7 @@ from absl import app, flags
 from tqdm import tqdm
 
 import gym_pusht  # noqa: F401 (registers environment)
-from gym_pusht.interactive import (
+from envs.interactive_utils import (
     ControlState,
     InterventionController,
     get_observation_image,
