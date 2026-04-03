@@ -1,7 +1,7 @@
 # PushT DAgger & ACT Project Workflow
 
 Project method details:
-We will be training two baseline policies that we reimplement from scratch (using python libraries as necessary) on the PushT dataset, to isolate the effect of chunking on task performance, these policies will be standard Behavior Cloning (using DAgger) and Chunked Behavior Cloning (using ACT). Our proposed methods are: (1) We adapt the human intervention logic in DAgger into ACT; (2) upon that, we implement our Residual Chunk Blending Algorithm. We will then measure how success rate changes under human intervention, comparing performance with and without our Residual Chunk Blending algorithm.
+We will be training two baseline policies that we reimplement from scratch (using python libraries as necessary) on the PushT dataset, to isolate the effect of chunking on task performance, these policies will be standard Behavior Cloning, BC with DAgger, and Chunked Behavior Cloning (using ACT). Our proposed methods are: (1) We adapt the human intervention logic in DAgger into ACT; (2) upon that, we implement our Residual Chunk Blending Algorithm. We will then measure how success rate changes under human intervention, comparing performance with and without our Residual Chunk Blending algorithm.
 
 ---
 
@@ -15,8 +15,12 @@ We will be training two baseline policies that we reimplement from scratch (usin
 - If using both human intervention and pure teleoperation data, merge them using npz_builder.py and train once. We probably won't do this though.
 
 ### 1.2. Data Format
-- Save data as `.npz` or similar, with arrays for observations, actions (or action chunks), rewards, and done flags.
-- For chunked data, ensure each entry contains a sequence of actions per state.
+- Canonical storage uses **per-step raw actions** in `.npz` files (LeRobot-style):
+  - `observation.state`: `(N, 2)`
+  - `action`: `(N, 2)`
+  - `next.reward`, `next.done`, `next.success`, `frame_index`, `timestamp`
+- ACT chunk targets are generated at load time via sliding window:
+  - `action_chunk[t] = [a_t, a_{t+1}, ..., a_{t+H-1}]` with tail padding at episode end.
 
 ---
 
@@ -26,7 +30,7 @@ We will be training two baseline policies that we reimplement from scratch (usin
 - Train a policy to map state → action using the demonstration data.
 - Use supervised learning (e.g., MSE loss for continuous actions).
 
-### 2.2. Chunked BC (for ACT)
+### 2.2. Chunked BC (using ACT paper)
 - Train a chunked policy to map state → action_chunk using chunked demonstration data.
 - The model outputs a sequence of actions per input state.
 
@@ -43,17 +47,17 @@ We will be training two baseline policies that we reimplement from scratch (usin
 - Roll out the current policy in the environment.
 - Allow a human (or expert) to provide corrective actions when the policy is uncertain or makes mistakes.
 - Aggregate new (state, expert action) pairs into the dataset.
-- Retrain the policy on the aggregated dataset after each iteration.
+- Retrain the policy using BC training on the aggregated dataset after each iteration.
 
 ### 3.2. ACT (Chunked DAgger)
 - Roll out the chunked policy (state → action_chunk) in the environment.
 - Allow human intervention to provide corrective action chunks as needed.
 - Aggregate new (state, expert action_chunk) pairs into the dataset.
-- Retrain the chunked policy after each iteration.
+- Retrain the old chunked BC policy after each iteration.
 
 ### 3.3. Residual Chunk Blending (Proposed Method)
-- Implement your Residual Chunk Blending logic on top of ACT.
-- Compare performance with and without this method.
+- Implement the Residual Chunk Blending logic on top of ACT.
+- a_{blended}= (1 - \lambda) \cdot a_{base} + \lambda \cdot a_{human}
 
 ---
 

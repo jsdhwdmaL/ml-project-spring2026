@@ -1,5 +1,6 @@
 """Trajectory recorder for human data collection.
-Records raw trajectory data during episode execution and builds action chunks.
+
+Records raw per-step trajectory data and writes LeRobot-style per-step fields.
 """
 
 from typing import Dict, Optional
@@ -8,42 +9,31 @@ import numpy as np
 
 
 class TrajectoryRecorder:
-    """Records raw trajectory data during episode and builds action chunks on finalize.
-
-    Stores raw per-step data and builds chunked actions in finalize() using the
-    StreamingChunkBuffer pattern from replay_buffer.py.
-    """
+    """Records raw per-step trajectory data and formats it at finalize()."""
 
     def __init__(
         self,
-        horizon: int = 16,
-        n_obs_steps: int = 2,
-        state_dim: int = 18,
+        state_dim: int = 2,
         act_dim: int = 2,
     ):
         """Initialize the trajectory recorder.
 
         Args:
-            horizon: Action chunk horizon (default 16)
-            n_obs_steps: Number of observation history steps (default 2)
-            state_dim: State dimension (default 18 for PushT)
+            state_dim: State dimension (default 2 for LeRobot-style PushT)
             act_dim: Action dimension (default 2 for PushT)
         """
-        self.horizon = horizon
-        self.n_obs_steps = n_obs_steps
         self.state_dim = state_dim
         self.act_dim = act_dim
         self.reset()
 
     def reset(self):
         """Clear recorded data."""
-        self.observations = []  # (n_obs_steps, state_dim) frame-stacked states
+        self.observations = []  # (state_dim,) states
         self.raw_actions = []  # (act_dim,) single raw action per step
-        self.rewards = []  # float, actual env reward
+        self.rewards = []  # float
         self.dones = []  # bool, termination flag
         self.success = []  # bool, success flag
         self.is_human = []  # bool
-        self.is_pure_teleop = []  # bool
         self.images = []  # Optional (96, 96, 3) uint8
 
     def record_step(
@@ -54,19 +44,17 @@ class TrajectoryRecorder:
         done: bool,
         success: bool,
         is_human: bool,
-        is_pure_teleop: bool = False,
         image: Optional[np.ndarray] = None,
     ):
         """Record one step of raw data.
 
         Args:
-            obs_state: Observation state (n_obs_steps, state_dim)
-            raw_action: Single raw action (act_dim,) - NOT chunked
+            obs_state: Observation state (state_dim,)
+            raw_action: Single raw action (act_dim,)
             reward: Reward from environment
             done: Whether episode terminated/truncated
             success: Whether this transition is successful
             is_human: Whether this step was human-controlled
-            is_pure_teleop: Whether this step is from pure teleoperation mode
             image: Optional image observation (H, W, 3)
         """
         self.observations.append(obs_state.copy())
@@ -75,35 +63,8 @@ class TrajectoryRecorder:
         self.dones.append(done)
         self.success.append(success)
         self.is_human.append(is_human)
-        self.is_pure_teleop.append(is_pure_teleop)
         if image is not None:
             self.images.append(image.copy())
-
-    def _build_action_chunks(self) -> tuple:
-        """Build action chunks from raw actions.
-
-        Uses StreamingChunkBuffer pattern: for each timestep t, the action chunk
-        contains actions from t to t+horizon-1, with padding for steps beyond
-        episode end.
-
-        Returns:
-            Tuple of (action_chunks, action_is_pad) arrays
-        """
-        T = len(self.raw_actions)
-        action_chunks = np.zeros((T, self.horizon, self.act_dim), dtype=np.float64)
-        action_is_pad = np.zeros((T, self.horizon), dtype=bool)
-
-        for t in range(T):
-            for j in range(self.horizon):
-                future_t = t + j
-                if future_t < T:
-                    action_chunks[t, j] = self.raw_actions[future_t]
-                else:
-                    # Pad with last valid action
-                    action_chunks[t, j] = self.raw_actions[-1]
-                    action_is_pad[t, j] = True
-
-        return action_chunks, action_is_pad
 
     def finalize(
         self,
@@ -113,11 +74,8 @@ class TrajectoryRecorder:
         terminated: bool,
         truncated: bool,
         success: bool,
-        is_pure_teleop_episode: bool = False,
     ) -> Dict:
-        """Finalize and return trajectory data compatible with dataloader.
-
-        Builds action chunks from raw actions and formats all data for NPZ storage.
+        """Finalize and return trajectory data in per-step raw schema.
 
         Args:
             env_seed: Environment seed
@@ -126,18 +84,15 @@ class TrajectoryRecorder:
             terminated: Whether episode terminated (goal reached)
             truncated: Whether episode was truncated (time limit)
             success: Whether episode was successful
-            is_pure_teleop_episode: Whether this episode is pure teleoperation
 
         Returns:
-            Dict with trajectory data in dataloader-compatible format
+            Dict with trajectory data in per-step raw format
         """
         T = len(self.observations)
 
-        # Build action chunks
-        action_chunks, action_is_pad = self._build_action_chunks()
-
         # Build frame indices
         frame_index = np.arange(T, dtype=np.int64)
+        timestamp = frame_index.astype(np.float32)
 
         # Build done array (only last step is done)
         # Build success array (success only at final step if successful)
@@ -154,19 +109,19 @@ class TrajectoryRecorder:
             if T > 0 and success:
                 success_array[-1] = True
 
-        is_pure_teleop_array = np.array(self.is_pure_teleop, dtype=bool)
-        if len(is_pure_teleop_array) != T:
-            is_pure_teleop_array = np.full(T, is_pure_teleop_episode, dtype=bool)
-
         data = {
-            # Core fields (required for dataloader merge)
-            'observation.state': np.array(self.observations, dtype=np.float64),
-            'action': action_chunks,  # (T, horizon, act_dim) - CHUNKED
-            'action_is_pad': action_is_pad,  # (T, horizon)
+            # Core per-step fields
+            'observation.state': np.array(self.observations, dtype=np.float32),
+            'action': np.array(self.raw_actions, dtype=np.float32),
             'frame_index': frame_index,  # (T,)
-            'environment.raw_reward': np.array(self.rewards, dtype=np.float64),  # Raw env rewards
+            'timestamp': timestamp,
+            'next.reward': np.array(self.rewards, dtype=np.float32),
             'next.done': done_array,
             'next.success': success_array,
+            'episode_index': np.zeros(T, dtype=np.int64),
+            'index': frame_index.copy(),
+            'task_index': np.zeros(T, dtype=np.int64),
+            'is_human_intervention': np.array(self.is_human, dtype=bool),
 
             # Episode metadata (scalar)
             'env_seed': np.array(env_seed, dtype=np.int64),
@@ -175,10 +130,6 @@ class TrajectoryRecorder:
             'terminated': np.array(terminated, dtype=bool),
             'truncated': np.array(truncated, dtype=bool),
             'success': np.array(success, dtype=bool),
-
-            # Intervention-specific
-            'is_human_intervention': np.array(self.is_human, dtype=bool),
-            'is_pure_teleop': is_pure_teleop_array,
         }
 
         return data

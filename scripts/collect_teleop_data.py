@@ -1,37 +1,24 @@
 # Use Python 3.11 for this whole thing, suggest creating a venv or conda env with python=3.11
 # need pymunk version < 7.0.0 for gym_pusht compatibility
 # pip uninstall -y pymunk && pip install "pymunk<7"
-"""Collect pure human teleoperation data in PushT with unified chunked schema.
-
-This script records raw per-step transitions and builds fixed-size action chunks
-at episode finalization, so one schema supports both:
-- Step-level DAgger/BC (use action[:, 0, :])
-- Chunked ACT (use action + action_is_pad)
+"""Collect pure human teleoperation data in PushT using per-step raw schema.
 
 Per-episode NPZ keys include:
-- observation.state: (N, 2, 18)
-- action: (N, H, 2)
-- action_is_pad: (N, H)
+- observation.state: (N, 2)
+- action: (N, 2)
 - frame_index: (N,)
-- environment.raw_reward: (N,)
+- timestamp: (N,)
+- next.reward: (N,)
 - next.done: (N,)
 - next.success: (N,)
 - is_human_intervention: (N,)
-- is_pure_teleop: (N,)
 - env_seed, trial_idx, success (episode-level scalars)
 
 Usage:
-# Chunked episodes
 python scripts/collect_teleop_data.py \
-    --output_dir data/pretraining/teleop_data_chunked \
+    --output_dir data/pretraining/teleop_data_raw \
     --num_seeds 10 \
-    --chunk_size 8
-
-# Non-chunked episodes (action chunks of size 1)
-python scripts/collect_teleop_data.py \
-    --output_dir data/pretraining/teleop_data_non_chunked \
-    --num_seeds 10 \
-    --chunk_size 1
+    --save_images=false
 """
 
 import os
@@ -72,7 +59,6 @@ flags.DEFINE_string("seeds", None, "Comma-separated list of specific seeds (over
 flags.DEFINE_integer("fps", 16, "Control/render frequency in Hz")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
-flags.DEFINE_integer("chunk_size", 8, "Action chunk horizon H (use 1 for non-chunked)")
 flags.DEFINE_bool("save_images", True, "Save image observations")
 flags.DEFINE_float("activation_radius", 30.0, "Mouse proximity threshold for control activation")
 
@@ -83,8 +69,8 @@ def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
 
 
 def get_obs_state(obs: Dict) -> np.ndarray:
-    """Build observation.state with shape (2, 18)."""
-    return np.concatenate([obs["agent_pos"], obs["environment_state"]], axis=-1)
+    """Build observation.state with shape (2,) (latest agent position)."""
+    return obs["agent_pos"][-1]
 
 
 def run_teleop_episode(
@@ -154,7 +140,6 @@ def run_teleop_episode(
             done=done,
             success=step_success,
             is_human=True,
-            is_pure_teleop=True,
             image=image,
         )
 
@@ -175,8 +160,6 @@ def run_teleop_episode(
 def main(_):
     if FLAGS.window_scale < 1.0:
         raise ValueError("window_scale must be >= 1.0")
-    if FLAGS.chunk_size < 1:
-        raise ValueError("chunk_size must be >= 1")
 
     window_size = int(512 * FLAGS.window_scale)
 
@@ -192,7 +175,6 @@ def main(_):
     print("=" * 60)
     print(f"Output dir: {FLAGS.output_dir}")
     print(f"Seeds: {seeds_str}")
-    print(f"Chunk size (H): {FLAGS.chunk_size}")
     print(f"FPS: {FLAGS.fps}, Window: {window_size}x{window_size}")
     print("=" * 60)
 
@@ -210,7 +192,7 @@ def main(_):
         activation_radius=FLAGS.activation_radius,
         window_scale=FLAGS.window_scale,
     )
-    recorder = TrajectoryRecorder(horizon=FLAGS.chunk_size)
+    recorder = TrajectoryRecorder()
     saver = EpisodeSaver(FLAGS.output_dir)
 
     print("\nControls: Q=quit, move mouse near agent to control\n")
@@ -222,7 +204,7 @@ def main(_):
     saved_success_count = 0
     skipped_failure_count = 0
     for current_seed in seed_list:
-        step_pbar.set_description(f"Seed {current_seed} T{trial_idx} (pure_teleop)")
+        step_pbar.set_description(f"Seed {current_seed} T{trial_idx}")
 
         terminated, truncated, success, quit_requested = run_teleop_episode(
             env=env,
@@ -253,7 +235,6 @@ def main(_):
                 terminated=terminated,
                 truncated=truncated,
                 success=success,
-                is_pure_teleop_episode=True,
             )
 
             saver.save(
@@ -263,7 +244,6 @@ def main(_):
                 trial_idx=trial_idx,
                 success=success,
                 had_intervention=True,
-                is_pure_teleop=True,
                 save_images=FLAGS.save_images,
             )
             saved_success_count += 1

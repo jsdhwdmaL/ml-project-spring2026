@@ -16,11 +16,10 @@ class EpisodeSaver:
     def __init__(self, output_dir: str):
         """Initialize the episode saver.
 
-        Creates four subdirectories:
+        Creates three subdirectories:
         - rejection_sample/: Successful autonomous episodes
         - human_intervention/: Episodes with human intervention
         - failed_autonomous/: Failed autonomous episodes
-        - pure_teleop/: Pure teleoperation episodes
 
         Args:
             output_dir: Base output directory
@@ -29,13 +28,11 @@ class EpisodeSaver:
         self.rejection_dir = self.output_dir / "rejection_sample"
         self.intervention_dir = self.output_dir / "human_intervention"
         self.failed_dir = self.output_dir / "failed_autonomous"
-        self.pure_teleop_dir = self.output_dir / "pure_teleop"
 
         # Create directories
         self.rejection_dir.mkdir(parents=True, exist_ok=True)
         self.intervention_dir.mkdir(parents=True, exist_ok=True)
         self.failed_dir.mkdir(parents=True, exist_ok=True)
-        self.pure_teleop_dir.mkdir(parents=True, exist_ok=True)
 
     def save(
         self,
@@ -45,7 +42,6 @@ class EpisodeSaver:
         trial_idx: int,
         success: bool,
         had_intervention: bool,
-        is_pure_teleop: bool = False,
         save_images: bool = True,
     ) -> Path:
         """Save trajectory to appropriate folder.
@@ -54,7 +50,6 @@ class EpisodeSaver:
         - Had intervention -> human_intervention/
         - No intervention + success -> rejection_sample/
         - No intervention + fail -> failed_autonomous/
-        - Pure teleoperation -> pure_teleop/
 
         Args:
             data: Trajectory data dict from TrajectoryRecorder.finalize()
@@ -63,16 +58,13 @@ class EpisodeSaver:
             trial_idx: Trial index
             success: Whether episode succeeded
             had_intervention: Whether human intervened
-            is_pure_teleop: Whether this episode is by pure human teleoperation
             save_images: Whether to save images
 
         Returns:
             Path to saved state file
         """
         # Determine folder
-        if is_pure_teleop:
-            folder = self.pure_teleop_dir
-        elif had_intervention:
+        if had_intervention:
             folder = self.intervention_dir
         elif success:
             folder = self.rejection_dir
@@ -85,7 +77,6 @@ class EpisodeSaver:
 
         # Save state data
         data_to_save = dict(data)
-        data_to_save.setdefault("is_pure_teleop", np.array(is_pure_teleop, dtype=bool))
         state_path = folder / f"{base_name}.npz"
         np.savez(state_path, **data_to_save)
 
@@ -106,5 +97,4 @@ class EpisodeSaver:
             "rejection_sample": len(list(self.rejection_dir.glob("*.npz"))) // 2,  # Divide by 2 for images
             "human_intervention": len(list(self.intervention_dir.glob("*.npz"))) // 2,
             "failed_autonomous": len(list(self.failed_dir.glob("*.npz"))) // 2,
-            "pure_teleop": len(list(self.pure_teleop_dir.glob("*.npz"))) // 2,
         }
