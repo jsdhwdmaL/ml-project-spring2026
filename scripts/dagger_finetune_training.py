@@ -13,22 +13,28 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset, WeightedRandomSampler
 from torchvision import models
+
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
 @dataclass
 class FinetuneConfig:
     model_path: str = "models/pretrain/best.pt"
     data_dir: str = "data/dagger"
+    original_dataset_id: str = "lerobot/pusht"
+    original_split: str = "train"
     output_dir: str = "models/dagger_finetuned"
     include_autonomous: bool = False
     include_failed: bool = False
     only_human_steps: bool = False
+    mix_dagger_ratio: float = 0.2
+    mix_original_ratio: float = 0.8
     val_ratio: float = 0.1
     epochs: int = 20
     batch_size: int = 64
-    learning_rate: float = 5e-5
+    learning_rate: float = 1e-5
     weight_decay: float = 1e-5
     seed: int = 42
 
@@ -93,11 +99,51 @@ class DaggerNPZDataset(Dataset):
         image = self.images[idx]
         if image.ndim != 3:
             raise ValueError(f"Expected image shape (H,W,3), got {image.shape}")
-        image = np.transpose(image, (2, 0, 1)) / 255.0
+        image = np.transpose(image, (2, 0, 1))
+        image_t = torch.from_numpy(image).float()
+        if image_t.numel() > 0 and torch.max(image_t) > 1.0:
+            image_t = image_t / 255.0
+        if image_t.shape[-2:] != (96, 96):
+            image_t = F.interpolate(
+                image_t.unsqueeze(0),
+                size=(96, 96),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
         return {
             "state": torch.from_numpy(self.states[idx]).float(),
-            "image": torch.from_numpy(image).float(),
+            "image": image_t,
             "action": torch.from_numpy(self.actions[idx]).float(),
+        }
+
+
+class LeRobotAdapterDataset(Dataset):
+    def __init__(self, base_dataset: Dataset):
+        self.base_dataset = base_dataset
+
+    def __len__(self):
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx: int):
+        sample = self.base_dataset[idx]
+        image = sample["observation.image"].float()
+        if image.ndim != 3:
+            raise ValueError(f"Expected image tensor [C,H,W] or [H,W,C], got shape {tuple(image.shape)}")
+        if image.shape[0] != 3 and image.shape[-1] == 3:
+            image = image.permute(2, 0, 1)
+        if image.numel() > 0 and torch.max(image) > 1.0:
+            image = image / 255.0
+        if image.shape[-2:] != (96, 96):
+            image = F.interpolate(
+                image.unsqueeze(0),
+                size=(96, 96),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+        return {
+            "state": sample["observation.state"].float(),
+            "image": image,
+            "action": sample["action"].float(),
         }
 
 
@@ -214,6 +260,88 @@ def _build_dataset_from_episode_files(episode_files: List[str], only_human_steps
     )
 
 
+def _load_lerobot_dataset(dataset_id: str, split: str) -> LeRobotDataset:
+    dataset = LeRobotDataset(dataset_id)
+    if hasattr(dataset, "hf_dataset") and hasattr(dataset.hf_dataset, "keys"):
+        if split in dataset.hf_dataset.keys():
+            dataset.hf_dataset = dataset.hf_dataset[split]
+    elif hasattr(dataset, "keys") and split in dataset.keys():
+        dataset = dataset[split]
+    return dataset
+
+
+def _split_lerobot_episode_indices(dataset: LeRobotDataset, val_ratio: float, seed: int) -> Tuple[np.ndarray, np.ndarray]:
+    if not hasattr(dataset, "hf_dataset"):
+        raise ValueError("LeRobotDataset missing `hf_dataset`, cannot perform episode-based split")
+
+    episode_index = np.array(dataset.hf_dataset["episode_index"]).flatten()
+    unique_eps = np.unique(episode_index)
+
+    rng = np.random.default_rng(seed)
+    rng.shuffle(unique_eps)
+
+    n_val_eps = max(1, int(len(unique_eps) * val_ratio)) if val_ratio > 0 else 0
+    val_eps = set(unique_eps[:n_val_eps].tolist())
+
+    val_mask = np.array([ep in val_eps for ep in episode_index], dtype=bool)
+    train_idx = np.where(~val_mask)[0]
+    val_idx = np.where(val_mask)[0]
+
+    if train_idx.size == 0:
+        raise ValueError("Empty original-data train split")
+    if val_idx.size == 0:
+        val_idx = train_idx.copy()
+    return train_idx, val_idx
+
+
+def _build_mixed_loader(
+    dagger_dataset: Dataset,
+    original_dataset: Dataset,
+    dagger_ratio: float,
+    original_ratio: float,
+    batch_size: int,
+    seed: int,
+    pin_memory: bool,
+) -> DataLoader:
+    if dagger_ratio < 0 or original_ratio < 0:
+        raise ValueError("Mix ratios must be non-negative")
+    if dagger_ratio + original_ratio <= 0:
+        raise ValueError("At least one mix ratio must be positive")
+
+    datasets: List[Dataset] = []
+    weights: List[float] = []
+
+    if len(dagger_dataset) > 0 and dagger_ratio > 0:
+        datasets.append(dagger_dataset)
+        weights.extend([dagger_ratio / len(dagger_dataset)] * len(dagger_dataset))
+
+    if len(original_dataset) > 0 and original_ratio > 0:
+        datasets.append(original_dataset)
+        weights.extend([original_ratio / len(original_dataset)] * len(original_dataset))
+
+    if not datasets:
+        raise ValueError("No samples available for mixed loader")
+
+    mixed_dataset = ConcatDataset(datasets)
+    num_samples = len(mixed_dataset)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    sampler = WeightedRandomSampler(
+        weights=torch.as_tensor(weights, dtype=torch.float64),
+        num_samples=num_samples,
+        replacement=True,
+        generator=generator,
+    )
+
+    return DataLoader(
+        mixed_dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=0,
+        pin_memory=pin_memory,
+    )
+
+
 def train(config: FinetuneConfig) -> None:
     if not os.path.exists(config.model_path):
         raise FileNotFoundError(f"Pretrained checkpoint not found: {config.model_path}")
@@ -225,26 +353,50 @@ def train(config: FinetuneConfig) -> None:
     )
     torch.manual_seed(config.seed)
 
+    ratio_sum = config.mix_dagger_ratio + config.mix_original_ratio
+    if ratio_sum <= 0:
+        raise ValueError("mix_dagger_ratio + mix_original_ratio must be > 0")
+    dagger_ratio = config.mix_dagger_ratio / ratio_sum
+    original_ratio = config.mix_original_ratio / ratio_sum
+
     episode_files = _collect_episode_files(config)
     print(f"Found {len(episode_files)} episode files for fine-tuning")
 
     train_files, val_files = _split_episode_files(episode_files, config.val_ratio, config.seed)
-    train_dataset = _build_dataset_from_episode_files(train_files, config.only_human_steps)
-    val_dataset = _build_dataset_from_episode_files(val_files, config.only_human_steps)
+    dagger_train_dataset = _build_dataset_from_episode_files(train_files, config.only_human_steps)
+    dagger_val_dataset = _build_dataset_from_episode_files(val_files, config.only_human_steps)
 
-    train_loader = DataLoader(
-        train_dataset,
+    original_dataset = _load_lerobot_dataset(config.original_dataset_id, config.original_split)
+    original_train_idx, original_val_idx = _split_lerobot_episode_indices(original_dataset, config.val_ratio, config.seed)
+    original_train_dataset = LeRobotAdapterDataset(Subset(original_dataset, original_train_idx.tolist()))
+    original_val_dataset = LeRobotAdapterDataset(Subset(original_dataset, original_val_idx.tolist()))
+
+    train_loader = _build_mixed_loader(
+        dagger_dataset=dagger_train_dataset,
+        original_dataset=original_train_dataset,
+        dagger_ratio=dagger_ratio,
+        original_ratio=original_ratio,
         batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=0,
+        seed=config.seed,
         pin_memory=(device.type == "cuda"),
     )
-    val_loader = DataLoader(
-        val_dataset,
+    val_loader = _build_mixed_loader(
+        dagger_dataset=dagger_val_dataset,
+        original_dataset=original_val_dataset,
+        dagger_ratio=dagger_ratio,
+        original_ratio=original_ratio,
         batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=0,
+        seed=config.seed + 1,
         pin_memory=(device.type == "cuda"),
+    )
+
+    print(
+        f"Mix ratios (effective): DAgger={dagger_ratio:.2f} | Original={original_ratio:.2f} | "
+        f"LR={config.learning_rate}"
+    )
+    print(
+        f"Train samples: DAgger={len(dagger_train_dataset)} Original={len(original_train_dataset)} | "
+        f"Val samples: DAgger={len(dagger_val_dataset)} Original={len(original_val_dataset)}"
     )
 
     checkpoint = torch.load(config.model_path, map_location=device, weights_only=False)
@@ -254,15 +406,10 @@ def train(config: FinetuneConfig) -> None:
     model.load_state_dict(checkpoint["model_state_dict"])
     model.train()
 
-    state_mean_np = train_dataset.states.mean(axis=0).astype(np.float32)
-    state_std_np = (train_dataset.states.std(axis=0) + 1e-6).astype(np.float32)
-    action_mean_np = train_dataset.actions.mean(axis=0).astype(np.float32)
-    action_std_np = (train_dataset.actions.std(axis=0) + 1e-6).astype(np.float32)
-
-    state_mean = torch.tensor(state_mean_np, dtype=torch.float32, device=device)
-    state_std = torch.tensor(state_std_np, dtype=torch.float32, device=device)
-    action_mean = torch.tensor(action_mean_np, dtype=torch.float32, device=device)
-    action_std = torch.tensor(action_std_np, dtype=torch.float32, device=device)
+    state_mean = torch.tensor(checkpoint["state_mean"], dtype=torch.float32, device=device)
+    state_std = torch.tensor(checkpoint["state_std"], dtype=torch.float32, device=device)
+    action_mean = torch.tensor(checkpoint["action_mean"], dtype=torch.float32, device=device)
+    action_std = torch.tensor(checkpoint["action_std"], dtype=torch.float32, device=device)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -369,14 +516,18 @@ def parse_args() -> FinetuneConfig:
     parser = argparse.ArgumentParser(description="Fine-tune pretrained BC model on DAgger-collected NPZ data")
     parser.add_argument("--model_path", type=str, default="models/pretrain/best.pt")
     parser.add_argument("--data_dir", type=str, default="data/dagger")
+    parser.add_argument("--original_dataset_id", type=str, default="lerobot/pusht")
+    parser.add_argument("--original_split", type=str, default="train")
     parser.add_argument("--output_dir", type=str, default="models/dagger_finetuned")
     parser.add_argument("--include_autonomous", action="store_true", default=False)
     parser.add_argument("--include_failed", action="store_true", default=False)
     parser.add_argument("--only_human_steps", action="store_true")
+    parser.add_argument("--mix_dagger_ratio", type=float, default=0.2)
+    parser.add_argument("--mix_original_ratio", type=float, default=0.8)
     parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--learning_rate", type=float, default=5e-5)
+    parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -384,10 +535,14 @@ def parse_args() -> FinetuneConfig:
     return FinetuneConfig(
         model_path=args.model_path,
         data_dir=args.data_dir,
+        original_dataset_id=args.original_dataset_id,
+        original_split=args.original_split,
         output_dir=args.output_dir,
         include_autonomous=args.include_autonomous,
         include_failed=args.include_failed,
         only_human_steps=args.only_human_steps,
+        mix_dagger_ratio=args.mix_dagger_ratio,
+        mix_original_ratio=args.mix_original_ratio,
         val_ratio=args.val_ratio,
         epochs=args.epochs,
         batch_size=args.batch_size,

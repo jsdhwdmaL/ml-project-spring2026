@@ -2,13 +2,13 @@
 
 Usage:
 python scripts/standard_bc_training.py \
-    --output_dir models/standard_bc \
+    --output_dir models/pretrain \
     --epochs 50 \
     --batch_size 64
 
 Small run:
 python scripts/standard_bc_training.py \
-    --output_dir models/standard_bc \
+    --output_dir models/pretrain \
     --epochs 2 \
     --batch_size 32 \
     --hidden_dim 64 \
@@ -36,7 +36,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 class TrainConfig:
     dataset_id: str = "lerobot/pusht"
     split: str = "train"
-    output_dir: str = "models/standard_bc"
+    output_dir: str = "models/pretrain"
     seed: int = 42
     val_ratio: float = 0.1
     hidden_dim: int = 256

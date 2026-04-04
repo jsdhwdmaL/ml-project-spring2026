@@ -23,8 +23,8 @@ from envs.interactive_utils import get_observation_image, draw_status_overlay, C
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/dagger_finetuned/best.pt", "Path to trained model weights")
-flags.DEFINE_integer("num_seeds", 20, "Number of episodes to evaluate")
+flags.DEFINE_string("model_path", "models/pretrain/best.pt", "Path to trained model weights")
+flags.DEFINE_integer("num_seeds", 1, "Number of episodes to evaluate")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz (Must match training data!)")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
@@ -121,6 +121,13 @@ def main(_):
         truncated = False
         success = False
         clock = pygame.time.Clock()
+        raw_action_min = np.array([np.inf, np.inf], dtype=np.float32)
+        raw_action_max = np.array([-np.inf, -np.inf], dtype=np.float32)
+        clipped_action_min = np.array([np.inf, np.inf], dtype=np.float32)
+        clipped_action_max = np.array([-np.inf, -np.inf], dtype=np.float32)
+        clipped_count = 0
+        edge_count = 0
+        action_count = 0
 
         while not (terminated or truncated):
             # Allow quitting via Q key
@@ -150,8 +157,16 @@ def main(_):
             
             # Un-normalize Action
             action_tensor = (action_tensor_norm * action_std) + action_mean
-            action = action_tensor.squeeze(0).cpu().numpy().astype(np.float32)
-            action = np.clip(action, 0.0, 512.0)
+            raw_action = action_tensor.squeeze(0).cpu().numpy().astype(np.float32)
+            action = np.clip(raw_action, 0.0, 512.0)
+
+            raw_action_min = np.minimum(raw_action_min, raw_action)
+            raw_action_max = np.maximum(raw_action_max, raw_action)
+            clipped_action_min = np.minimum(clipped_action_min, action)
+            clipped_action_max = np.maximum(clipped_action_max, action)
+            clipped_count += int(np.any(np.abs(action - raw_action) > 1e-6))
+            edge_count += int(np.any((action <= 1.0) | (action >= 511.0)))
+            action_count += 1
             
             # Step Env
             obs, reward, terminated, truncated, info = env.step(action)
@@ -184,6 +199,16 @@ def main(_):
             print(f"Episode {seed + 1}/{FLAGS.num_seeds} - SUCCESS (Took {step} steps)")
         else:
             print(f"Episode {seed + 1}/{FLAGS.num_seeds} - FAILED (Reached {step} steps)")
+
+        if action_count > 0:
+            clip_rate = 100.0 * clipped_count / action_count
+            edge_rate = 100.0 * edge_count / action_count
+            print(
+                "  Action stats | "
+                f"raw_min={raw_action_min.tolist()} raw_max={raw_action_max.tolist()} | "
+                f"clipped_min={clipped_action_min.tolist()} clipped_max={clipped_action_max.tolist()} | "
+                f"clip_rate={clip_rate:.1f}% edge_rate={edge_rate:.1f}%"
+            )
 
     print("=" * 60)
     print(f"Evaluation Complete! Success Rate: {success_count}/{FLAGS.num_seeds} ({(success_count/FLAGS.num_seeds)*100:.1f}%)")
