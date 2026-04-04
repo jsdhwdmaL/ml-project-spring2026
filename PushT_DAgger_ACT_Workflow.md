@@ -53,7 +53,7 @@ We will be training two baseline policies that we reimplement from scratch (usin
 
 ### 3.3. Residual Chunk Blending (Proposed Method)
 - Implement the Residual Chunk Blending logic on top of ACT.
-- a_{blended}= (1 - \lambda) \cdot a_{base} + \lambda \cdot a_{human}
+- $a_{blended}= (1 - \lambda) \cdot a_{base} + \lambda \cdot a_{human}$
 
 ---
 
@@ -79,8 +79,10 @@ We will be training two baseline policies that we reimplement from scratch (usin
 
 ## 6. References
 - DAgger: Ross et al., 2011 (https://arxiv.org/abs/1011.0686)
-- ACT: Mandlekar et al., 2022 (https://arxiv.org/abs/2207.12316)
+- ACT: Zhao et al., 2023 (https://arxiv.org/abs/2304.13705)
 
+<!--
 ---
 
 _This workflow is designed to help you systematically compare standard and chunked imitation learning methods, and to evaluate your proposed improvements in a controlled, reproducible way._
+-->
