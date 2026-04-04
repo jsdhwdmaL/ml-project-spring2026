@@ -25,12 +25,12 @@ class FinetuneConfig:
     data_dir: str = "data/dagger"
     original_dataset_id: str = "lerobot/pusht"
     original_split: str = "train"
-    output_dir: str = "models/dagger_finetuned"
+    output_dir: str = "models/dagger2"
     include_autonomous: bool = False
     include_failed: bool = False
     only_human_steps: bool = False
-    mix_dagger_ratio: float = 0.2
-    mix_original_ratio: float = 0.8
+    mix_dagger_ratio: float = 0.5
+    mix_original_ratio: float = 0.5
     val_ratio: float = 0.1
     epochs: int = 20
     batch_size: int = 64
