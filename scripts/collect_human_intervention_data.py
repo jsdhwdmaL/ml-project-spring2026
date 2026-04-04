@@ -38,7 +38,6 @@ from envs.interactive_utils import (
     get_observation_image,
     draw_status_overlay,
 )
-from envs.frame_stack_wrapper import FrameStackWrapperEnv
 from data.trajectory_recorder import TrajectoryRecorder
 from data.episode_saver import EpisodeSaver
 
@@ -55,8 +54,6 @@ flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
 flags.DEFINE_bool("save_images", True, "Save image observations")
 flags.DEFINE_float("activation_radius", 30.0, "Mouse proximity threshold for human activation")
 flags.DEFINE_integer("policy_seed", -1, "Policy seed metadata to save")
-flags.DEFINE_integer("n_frames", 2, "Frame stack size")
-flags.DEFINE_integer("frame_gap", 1, "Frame stack temporal gap")
 
 
 class BehavioralCloningPolicy(nn.Module):
@@ -95,7 +92,10 @@ def parse_seed_list() -> List[int]:
 
 
 def get_latest_agent_pos(obs: Dict) -> np.ndarray:
-    return np.asarray(obs["agent_pos"][-1], dtype=np.float32)
+    agent_pos = np.asarray(obs["agent_pos"], dtype=np.float32)
+    if agent_pos.ndim == 1:
+        return agent_pos
+    return agent_pos[-1]
 
 
 def run_dagger_episode(
@@ -250,7 +250,6 @@ def main(_):
         visualization_height=window_size,
     )
     env = gym.wrappers.TimeLimit(env, max_episode_steps=FLAGS.max_steps)
-    env = FrameStackWrapperEnv(env, n_frames=FLAGS.n_frames, gap=FLAGS.frame_gap)
 
     controller = InterventionController(
         activation_radius=FLAGS.activation_radius,

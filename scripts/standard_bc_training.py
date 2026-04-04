@@ -24,6 +24,7 @@ from typing import Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from torchvision import models
 
@@ -78,6 +79,15 @@ class BehavioralCloningPolicy(nn.Module):
         state_features = self.state_encoder(state) 
         combined_features = torch.cat([img_features, state_features], dim=1) 
         return self.action_head(combined_features) 
+
+
+def preprocess_image_batch(images: torch.Tensor) -> torch.Tensor:
+    images = images.to(dtype=torch.float32)
+    if images.numel() > 0 and torch.max(images) > 1.0:
+        images = images / 255.0
+    if images.shape[-2:] != (96, 96):
+        images = F.interpolate(images, size=(96, 96), mode="bilinear", align_corners=False)
+    return images
 
 
 # ==========================================
@@ -158,7 +168,8 @@ def train(config: TrainConfig) -> None:
         running_loss = 0.0
 
         for batch in train_loader:
-            images = batch["observation.image"].to(device, dtype=torch.float32)
+            images = batch["observation.image"].to(device)
+            images = preprocess_image_batch(images)
             states = batch["observation.state"].to(device, dtype=torch.float32)
             actions = batch["action"].to(device, dtype=torch.float32)
 
@@ -183,7 +194,8 @@ def train(config: TrainConfig) -> None:
         val_loss_sum = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                images = batch["observation.image"].to(device, dtype=torch.float32)
+                images = batch["observation.image"].to(device)
+                images = preprocess_image_batch(images)
                 states = batch["observation.state"].to(device, dtype=torch.float32)
                 actions = batch["action"].to(device, dtype=torch.float32)
                 

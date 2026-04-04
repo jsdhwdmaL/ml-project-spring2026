@@ -2,17 +2,17 @@
 """Fine-tune a pretrained vision BC model on collected DAgger NPZ trajectories."""
 
 import argparse
-import glob
 import json
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models
 
@@ -20,10 +20,10 @@ from torchvision import models
 @dataclass
 class FinetuneConfig:
     model_path: str = "models/pretrain/best.pt"
-    data_dir: str = "data/dagger/human_intervention"
+    data_dir: str = "data/dagger"
     output_dir: str = "models/dagger_finetuned"
-    include_autonomous: bool = True
-    include_failed: bool = True
+    include_autonomous: bool = False
+    include_failed: bool = False
     only_human_steps: bool = False
     val_ratio: float = 0.1
     epochs: int = 20
@@ -101,6 +101,15 @@ class DaggerNPZDataset(Dataset):
         }
 
 
+def preprocess_image_batch(images: torch.Tensor) -> torch.Tensor:
+    images = images.to(dtype=torch.float32)
+    if images.numel() > 0 and torch.max(images) > 1.0:
+        images = images / 255.0
+    if images.shape[-2:] != (96, 96):
+        images = F.interpolate(images, size=(96, 96), mode="bilinear", align_corners=False)
+    return images
+
+
 def _collect_episode_files(config: FinetuneConfig) -> List[str]:
     base = Path(config.data_dir)
     if not base.exists():
@@ -161,21 +170,48 @@ def _load_episode_pair(ep_file: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray
     return states, images, actions, is_human
 
 
-def _split_indices(n: int, val_ratio: float, seed: int) -> Tuple[np.ndarray, np.ndarray]:
+def _split_episode_files(episode_files: List[str], val_ratio: float, seed: int) -> Tuple[List[str], List[str]]:
+    if not episode_files:
+        raise ValueError("No episode files to split")
+
     rng = np.random.default_rng(seed)
-    indices = np.arange(n)
+    indices = np.arange(len(episode_files))
     rng.shuffle(indices)
 
-    n_val = max(1, int(n * val_ratio)) if val_ratio > 0 else 0
-    val_idx = indices[:n_val]
-    train_idx = indices[n_val:]
+    n_val = max(1, int(len(indices) * val_ratio)) if val_ratio > 0 else 0
+    val_indices = indices[:n_val]
+    train_indices = indices[n_val:]
 
-    if train_idx.size == 0:
+    if train_indices.size == 0:
         raise ValueError("Empty train split")
-    if val_idx.size == 0:
-        val_idx = train_idx.copy()
+    if val_indices.size == 0:
+        val_indices = train_indices.copy()
 
-    return train_idx, val_idx
+    train_files = [episode_files[i] for i in train_indices.tolist()]
+    val_files = [episode_files[i] for i in val_indices.tolist()]
+    return train_files, val_files
+
+
+def _build_dataset_from_episode_files(episode_files: List[str], only_human_steps: bool) -> DaggerNPZDataset:
+    state_list: List[np.ndarray] = []
+    image_list: List[np.ndarray] = []
+    action_list: List[np.ndarray] = []
+    is_human_list: List[np.ndarray] = []
+
+    for ep_file in episode_files:
+        states, images, actions, is_human = _load_episode_pair(ep_file)
+        state_list.append(states)
+        image_list.append(images)
+        action_list.append(actions)
+        is_human_list.append(is_human)
+
+    return DaggerNPZDataset(
+        state_list=state_list,
+        image_list=image_list,
+        action_list=action_list,
+        is_human_list=is_human_list,
+        only_human_steps=only_human_steps,
+    )
 
 
 def train(config: FinetuneConfig) -> None:
@@ -192,39 +228,19 @@ def train(config: FinetuneConfig) -> None:
     episode_files = _collect_episode_files(config)
     print(f"Found {len(episode_files)} episode files for fine-tuning")
 
-    state_list: List[np.ndarray] = []
-    image_list: List[np.ndarray] = []
-    action_list: List[np.ndarray] = []
-    is_human_list: List[np.ndarray] = []
-
-    for ep_file in episode_files:
-        states, images, actions, is_human = _load_episode_pair(ep_file)
-        state_list.append(states)
-        image_list.append(images)
-        action_list.append(actions)
-        is_human_list.append(is_human)
-
-    dataset = DaggerNPZDataset(
-        state_list=state_list,
-        image_list=image_list,
-        action_list=action_list,
-        is_human_list=is_human_list,
-        only_human_steps=config.only_human_steps,
-    )
-
-    train_idx, val_idx = _split_indices(len(dataset), config.val_ratio, config.seed)
-    train_subset = torch.utils.data.Subset(dataset, train_idx.tolist())
-    val_subset = torch.utils.data.Subset(dataset, val_idx.tolist())
+    train_files, val_files = _split_episode_files(episode_files, config.val_ratio, config.seed)
+    train_dataset = _build_dataset_from_episode_files(train_files, config.only_human_steps)
+    val_dataset = _build_dataset_from_episode_files(val_files, config.only_human_steps)
 
     train_loader = DataLoader(
-        train_subset,
+        train_dataset,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=0,
         pin_memory=(device.type == "cuda"),
     )
     val_loader = DataLoader(
-        val_subset,
+        val_dataset,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=0,
@@ -238,10 +254,15 @@ def train(config: FinetuneConfig) -> None:
     model.load_state_dict(checkpoint["model_state_dict"])
     model.train()
 
-    state_mean = torch.tensor(checkpoint["state_mean"], dtype=torch.float32, device=device)
-    state_std = torch.tensor(checkpoint["state_std"], dtype=torch.float32, device=device)
-    action_mean = torch.tensor(checkpoint["action_mean"], dtype=torch.float32, device=device)
-    action_std = torch.tensor(checkpoint["action_std"], dtype=torch.float32, device=device)
+    state_mean_np = train_dataset.states.mean(axis=0).astype(np.float32)
+    state_std_np = (train_dataset.states.std(axis=0) + 1e-6).astype(np.float32)
+    action_mean_np = train_dataset.actions.mean(axis=0).astype(np.float32)
+    action_std_np = (train_dataset.actions.std(axis=0) + 1e-6).astype(np.float32)
+
+    state_mean = torch.tensor(state_mean_np, dtype=torch.float32, device=device)
+    state_std = torch.tensor(state_std_np, dtype=torch.float32, device=device)
+    action_mean = torch.tensor(action_mean_np, dtype=torch.float32, device=device)
+    action_std = torch.tensor(action_std_np, dtype=torch.float32, device=device)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -259,6 +280,7 @@ def train(config: FinetuneConfig) -> None:
 
         for batch in train_loader:
             images = batch["image"].to(device)
+            images = preprocess_image_batch(images)
             states = batch["state"].to(device)
             actions = batch["action"].to(device)
 
@@ -284,6 +306,7 @@ def train(config: FinetuneConfig) -> None:
         with torch.no_grad():
             for batch in val_loader:
                 images = batch["image"].to(device)
+                images = preprocess_image_batch(images)
                 states = batch["state"].to(device)
                 actions = batch["action"].to(device)
 
@@ -303,11 +326,7 @@ def train(config: FinetuneConfig) -> None:
             "state_std": state_std.detach().cpu().numpy().astype(np.float32),
             "action_mean": action_mean.detach().cpu().numpy().astype(np.float32),
             "action_std": action_std.detach().cpu().numpy().astype(np.float32),
-            "config": {
-                "hidden_dim": hidden_dim,
-                "finetune": asdict(config),
-                "source_checkpoint": config.model_path,
-            },
+            "config": {**asdict(config), "hidden_dim": hidden_dim, "source_checkpoint": config.model_path},
             "epoch": epoch,
             "train_loss": train_loss,
             "val_loss": val_loss,
@@ -351,8 +370,8 @@ def parse_args() -> FinetuneConfig:
     parser.add_argument("--model_path", type=str, default="models/pretrain/best.pt")
     parser.add_argument("--data_dir", type=str, default="data/dagger")
     parser.add_argument("--output_dir", type=str, default="models/dagger_finetuned")
-    parser.add_argument("--include_autonomous", action="store_true")
-    parser.add_argument("--include_failed", action="store_true")
+    parser.add_argument("--include_autonomous", action="store_true", default=False)
+    parser.add_argument("--include_failed", action="store_true", default=False)
     parser.add_argument("--only_human_steps", action="store_true")
     parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--epochs", type=int, default=20)

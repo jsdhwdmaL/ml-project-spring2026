@@ -45,8 +45,6 @@ from envs.interactive_utils import (
     get_observation_image,
     draw_status_overlay,
 )
-
-from envs.frame_stack_wrapper import FrameStackWrapperEnv
 from data.trajectory_recorder import TrajectoryRecorder
 from data.episode_saver import EpisodeSaver
 
@@ -56,7 +54,7 @@ flags.DEFINE_string("output_dir", "./teleop_data", "Output directory for collect
 flags.DEFINE_integer("start_seed", 0, "Starting environment seed (ignored if --seeds is provided)")
 flags.DEFINE_integer("num_seeds", 10, "Number of seeds to collect (ignored if --seeds is provided)")
 flags.DEFINE_string("seeds", None, "Comma-separated list of specific seeds (overrides start_seed/num_seeds)")
-flags.DEFINE_integer("fps", 16, "Control/render frequency in Hz")
+flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
 flags.DEFINE_bool("save_images", True, "Save image observations")
@@ -64,13 +62,16 @@ flags.DEFINE_float("activation_radius", 30.0, "Mouse proximity threshold for con
 
 
 def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
-    """Extract current agent position [x, y] from frame-stacked observation."""
-    return obs["agent_pos"][-1]
+    """Extract current agent position [x, y] from observation."""
+    agent_pos = np.asarray(obs["agent_pos"], dtype=np.float32)
+    if agent_pos.ndim == 1:
+        return agent_pos
+    return agent_pos[-1]
 
 
 def get_obs_state(obs: Dict) -> np.ndarray:
     """Build observation.state with shape (2,) (latest agent position)."""
-    return obs["agent_pos"][-1]
+    return get_agent_pos_from_obs(obs)
 
 
 def run_teleop_episode(
@@ -186,7 +187,6 @@ def main(_):
         visualization_height=window_size,
     )
     env = gym.wrappers.TimeLimit(env, max_episode_steps=FLAGS.max_steps)
-    env = FrameStackWrapperEnv(env, n_frames=2, gap=1)
 
     controller = InterventionController(
         activation_radius=FLAGS.activation_radius,

@@ -3,6 +3,8 @@ from typing import Dict
 
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
 
+import sys
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -12,13 +14,16 @@ import gymnasium as gym
 import pygame
 from absl import app, flags
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 import gym_pusht  # registers environment
-from envs.frame_stack_wrapper import FrameStackWrapperEnv
 from envs.interactive_utils import get_observation_image, draw_status_overlay, ControlState
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/standard_bc/best.pt", "Path to trained model weights")
+flags.DEFINE_string("model_path", "models/dagger_finetuned/best.pt", "Path to trained model weights")
 flags.DEFINE_integer("num_seeds", 20, "Number of episodes to evaluate")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz (Must match training data!)")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
@@ -59,8 +64,11 @@ class BehavioralCloningPolicy(nn.Module):
 # 2. Helper Functions (Matching Data Collection)
 # ==========================================
 def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
-    """Extract current agent position [x, y] from frame-stacked observation."""
-    return obs["agent_pos"][-1]
+    """Extract current agent position [x, y] from observation."""
+    agent_pos = np.asarray(obs["agent_pos"], dtype=np.float32)
+    if agent_pos.ndim == 1:
+        return agent_pos
+    return agent_pos[-1]
 
 # ==========================================
 # 3. Main Evaluation Loop
@@ -72,7 +80,10 @@ def main(_):
     # Load checkpoint with weights_only=False to allow numpy arrays (normalization stats)
     checkpoint = torch.load(FLAGS.model_path, map_location=device, weights_only=False)
     
-    model = BehavioralCloningPolicy(state_dim=2, action_dim=2).to(device)
+    config = checkpoint.get("config", {})
+    hidden_dim = int(config.get("hidden_dim", 256))
+
+    model = BehavioralCloningPolicy(state_dim=2, action_dim=2, hidden_dim=hidden_dim).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
@@ -99,7 +110,6 @@ def main(_):
         visualization_height=window_size,
     )
     env = gym.wrappers.TimeLimit(env, max_episode_steps=FLAGS.max_steps)
-    env = FrameStackWrapperEnv(env, n_frames=2, gap=1)
 
     print("\nStarting Evaluation...")
     success_count = 0
@@ -140,7 +150,8 @@ def main(_):
             
             # Un-normalize Action
             action_tensor = (action_tensor_norm * action_std) + action_mean
-            action = action_tensor.squeeze(0).cpu().numpy()
+            action = action_tensor.squeeze(0).cpu().numpy().astype(np.float32)
+            action = np.clip(action, 0.0, 512.0)
             
             # Step Env
             obs, reward, terminated, truncated, info = env.step(action)
