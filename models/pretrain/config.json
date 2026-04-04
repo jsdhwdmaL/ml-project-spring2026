@@ -1,0 +1,12 @@
+{
+  "dataset_id": "lerobot/pusht",
+  "split": "train",
+  "output_dir": "models/standard_bc",
+  "seed": 42,
+  "val_ratio": 0.1,
+  "hidden_dim": 256,
+  "epochs": 50,
+  "batch_size": 64,
+  "learning_rate": 0.0001,
+  "weight_decay": 1e-05
+}

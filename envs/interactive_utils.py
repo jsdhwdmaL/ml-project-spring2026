@@ -5,6 +5,7 @@ from enum import Enum
 class ControlState(Enum):
     PAUSED = "PAUSED"
     HUMAN_CONTROL = "HUMAN_CONTROL"
+    MODEL_CONTROL = "MODEL_CONTROL"  # Added for inference
 
 class InterventionController:
     def __init__(self, activation_radius=30.0, window_scale=1.0):
@@ -29,7 +30,6 @@ class InterventionController:
     def try_activate_human_control(self, agent_pos):
         """Activates if the mouse gets close to the agent or clicks."""
         mouse_pos = pygame.mouse.get_pos()
-        # Scale mouse position back to the default environment coordinates
         env_x = mouse_pos[0] / self.window_scale
         env_y = mouse_pos[1] / self.window_scale
         
@@ -47,15 +47,10 @@ class InterventionController:
         return np.array([env_x, env_y], dtype=np.float32)
 
 def get_observation_image(env):
-    """
-    Grabs the RGB frame directly from the active pygame surface since 
-    render_mode='human' often suppresses array returns.
-    """
+    """Grabs the RGB frame directly from the active pygame surface."""
     screen = pygame.display.get_surface()
     if screen is not None:
-        # Pygame surfaces are (Width, Height, RGB)
         image_array = pygame.surfarray.array3d(screen)
-        # Transpose to standard (Height, Width, RGB)
         return np.transpose(image_array, (1, 0, 2))
     return np.zeros((512, 512, 3), dtype=np.uint8)
 
@@ -65,15 +60,23 @@ def draw_status_overlay(env, state, env_seed, trial_idx, step, max_steps, agent_
     if screen is None:
         return
 
+    # Use a default font that is likely to exist on Mac/Linux
     pygame.font.init()
-    font = pygame.font.SysFont(None, 24)
+    font = pygame.font.SysFont("Arial", 20, bold=True)
     
-    text = f"Seed: {env_seed} | Trial: {trial_idx} | Step: {step}/{max_steps} | State: {state.value}"
-    text_surface = font.render(text, True, (0, 0, 0))
+    # Text color: Red if human is interfering, Blue if model is running, Black if paused
+    color = (0, 0, 0)
+    if state == ControlState.HUMAN_CONTROL:
+        color = (200, 0, 0)
+    elif state == ControlState.MODEL_CONTROL:
+        color = (0, 0, 200)
+
+    text = f"Seed: {env_seed} | Step: {step}/{max_steps} | {state.value}"
+    text_surface = font.render(text, True, color)
     
-    # White background for text visibility
-    bg_rect = text_surface.get_rect(topleft=(10, 10))
+    # Draw a semi-transparent box or simple white background for text
+    bg_rect = text_surface.get_rect(topleft=(15, 15))
     pygame.draw.rect(screen, (255, 255, 255), bg_rect.inflate(10, 10))
-    screen.blit(text_surface, (10, 10))
+    screen.blit(text_surface, (15, 15))
 
     pygame.display.flip()
