@@ -1,13 +1,13 @@
 """Train a Vision-based Behavioral Cloning policy on lerobot/pusht.
 
 Usage:
-python scripts/standard_bc_training_second.py \
+python scripts/standard_bc_training.py \
     --output_dir models/standard_bc \
     --epochs 50 \
     --batch_size 64
 
 Small run:
-python scripts/standard_bc_training_second.py \
+python scripts/standard_bc_training.py \
     --output_dir models/standard_bc \
     --epochs 2 \
     --batch_size 32 \
