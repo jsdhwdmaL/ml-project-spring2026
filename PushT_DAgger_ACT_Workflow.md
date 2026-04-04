@@ -5,14 +5,10 @@ We will be training two baseline policies that we reimplement from scratch (usin
 
 ---
 
-## 1. Data Collection
+## 1. Data and Format
 
-### 1.1. Human Demonstration Data (Pretraining)
-- Collect a small set of high-quality human demonstrations (teleoperation or intervention) in the PushT environment.
-- For DAgger/BC: Record (state, action) pairs.
-- For ACT/Chunked BC: Record (state, action_chunk) pairs (i.e., sequences of actions per chunk).
-- If using an existing dataset (e.g., LeRobot), ensure data compatibility (observation/action format, environment domain).
-- If using both human intervention and pure teleoperation data, merge them using npz_builder.py and train once. We probably won't do this though.
+### 1.1. Pretraining Data Source
+- Existing dataset LeRobot/pusht, ensure data compatibility (observation/action format, environment domain)
 
 ### 1.2. Data Format
 - Canonical storage uses **per-step raw actions** in `.npz` files (LeRobot-style):
@@ -35,7 +31,7 @@ We will be training two baseline policies that we reimplement from scratch (usin
 - The model outputs a sequence of actions per input state.
 
 ### 2.3. Model Initialization
-- You will have two separate pretrained models:
+- We will have two separate pretrained models:
   - DAgger/BC: state → action
   - ACT/Chunked BC: state → action_chunk
 
