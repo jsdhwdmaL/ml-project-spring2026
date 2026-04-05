@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -73,7 +74,7 @@ class DaggerNPZDataset(Dataset):
         only_human_steps: bool,
     ):
         states = np.concatenate(state_list, axis=0).astype(np.float32)
-        images = np.concatenate(image_list, axis=0).astype(np.float32)
+        images = np.concatenate(image_list, axis=0) # keep as uint8 to save memory
         actions = np.concatenate(action_list, axis=0).astype(np.float32)
         is_human = np.concatenate(is_human_list, axis=0).astype(bool)
 
@@ -96,7 +97,7 @@ class DaggerNPZDataset(Dataset):
         return self.states.shape[0]
 
     def __getitem__(self, idx: int):
-        image = self.images[idx]
+        image = self.images[idx].astype(np.float32) 
         if image.ndim != 3:
             raise ValueError(f"Expected image shape (H,W,3), got {image.shape}")
         image = np.transpose(image, (2, 0, 1))
