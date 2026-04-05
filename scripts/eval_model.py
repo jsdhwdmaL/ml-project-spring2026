@@ -28,9 +28,9 @@ from envs.interactive_utils import get_observation_image, draw_status_overlay, C
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/pretrain/best.pt", "Path to trained model weights")
-flags.DEFINE_integer("num_seeds", 1, "Number of episodes to evaluate")
-flags.DEFINE_boolean("random_seeds", False, "Sample random seeds instead of using 0..num_seeds-1")
+flags.DEFINE_string("model_path", "models/pretrain_smoothl1/best.pt", "Path to trained model weights")
+flags.DEFINE_integer("num_seeds", 5, "Number of episodes to evaluate")
+flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using 0..num_seeds-1")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz (Must match training data!)")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
