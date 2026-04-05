@@ -23,6 +23,7 @@ import json
 import os
 from dataclasses import asdict, dataclass
 from typing import Tuple
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -155,7 +156,7 @@ def train(config: TrainConfig) -> None:
         # --- TRAINING PHASE ---
         model.train()
         train_loss_sum = 0.0
-        for batch in train_loader:
+        for batch in tqdm(train_loader):
             images = preprocess_image_batch(batch["observation.image"].to(device), train_tf)
             states = batch["observation.state"].to(device, dtype=torch.float32)
             actions = batch["action"].to(device, dtype=torch.float32)
@@ -177,7 +178,7 @@ def train(config: TrainConfig) -> None:
         model.eval()
         val_loss_sum = 0.0
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in tqdm(val_loader):
                 images = preprocess_image_batch(batch["observation.image"].to(device), val_tf)
                 states = batch["observation.state"].to(device, dtype=torch.float32)
                 actions = batch["action"].to(device, dtype=torch.float32)
