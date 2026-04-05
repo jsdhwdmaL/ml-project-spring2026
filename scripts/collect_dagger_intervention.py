@@ -47,7 +47,8 @@ flags.DEFINE_string("model_path", "models/dagger1/best.pt", "Path to pretrained 
 flags.DEFINE_string("output_dir", "data/dagger2", "Directory to save collected DAgger data")
 flags.DEFINE_integer("start_seed", 0, "Starting seed (ignored if --seeds is provided)")
 flags.DEFINE_integer("num_seeds", 10, "Number of seeds to collect (ignored if --seeds is provided)")
-flags.DEFINE_string("seeds", None, "Comma-separated explicit seed list (overrides start_seed/num_seeds)")
+flags.DEFINE_boolean("random_seeds", False, "Sample random seeds instead of using start_seed..start_seed+num_seeds-1")
+flags.DEFINE_string("seeds", None, "Comma-separated explicit seed list (overrides start_seed/num_seeds/random_seeds)")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>=1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
@@ -88,6 +89,8 @@ def parse_seed_list() -> List[int]:
         if not seeds:
             raise ValueError("--seeds was provided but no valid integers were parsed")
         return seeds
+    if FLAGS.random_seeds:
+        return np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist()
     return list(range(FLAGS.start_seed, FLAGS.start_seed + FLAGS.num_seeds))
 
 

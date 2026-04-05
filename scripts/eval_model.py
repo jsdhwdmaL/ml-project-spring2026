@@ -5,6 +5,11 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated", categor
 
 import sys
 import os
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -25,6 +30,7 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string("model_path", "models/pretrain/best.pt", "Path to trained model weights")
 flags.DEFINE_integer("num_seeds", 1, "Number of episodes to evaluate")
+flags.DEFINE_boolean("random_seeds", False, "Sample random seeds instead of using 0..num_seeds-1")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz (Must match training data!)")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
@@ -114,7 +120,8 @@ def main(_):
     print("\nStarting Evaluation...")
     success_count = 0
 
-    for seed in range(FLAGS.num_seeds):
+    seeds = np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist() if FLAGS.random_seeds else range(FLAGS.num_seeds)
+    for seed in seeds:
         obs, _ = env.reset(seed=seed)
         step = 0
         terminated = False

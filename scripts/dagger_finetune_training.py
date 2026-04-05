@@ -425,7 +425,7 @@ def train(config: FinetuneConfig) -> None:
         train_loss_sum = 0.0
         train_batches = 0
 
-        for batch in train_loader:
+        for batch in tqdm(train_loader):
             images = batch["image"].to(device)
             images = preprocess_image_batch(images)
             states = batch["state"].to(device)
@@ -451,7 +451,7 @@ def train(config: FinetuneConfig) -> None:
         val_loss_sum = 0.0
         val_batches = 0
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in tqdm(val_loader):
                 images = batch["image"].to(device)
                 images = preprocess_image_batch(images)
                 states = batch["state"].to(device)
