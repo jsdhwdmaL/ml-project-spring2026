@@ -20,9 +20,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from torchvision import models, transforms
+import sys
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 # Import LeRobotDataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from models.bc_mlp import BehavioralCloningPolicy
 
 @dataclass
 class TrainConfig:

@@ -25,7 +25,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from scripts.bc_mlp_train import BehavioralCloningPolicy
+from models.bc_mlp import BehavioralCloningPolicy
 
 @dataclass
 class FinetuneConfig:

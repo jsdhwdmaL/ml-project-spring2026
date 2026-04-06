@@ -22,61 +22,18 @@ from absl import app, flags
 
 import gym_pusht  # registers environment
 from envs.interactive_utils import get_observation_image, draw_status_overlay, ControlState
+from models.bc_mlp import BehavioralCloningPolicy
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/pretrain_stacked/best.pt", "Path to trained model weights")
+flags.DEFINE_string("model_path", "models/bc_mlp_dagger/best.pt", "Path to trained model weights")
 flags.DEFINE_integer("num_seeds", 5, "Number of episodes to evaluate")
 flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using 0..num_seeds-1")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz (Must match training data!)")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
 
-# ==========================================
-# 1. Model Architecture (UPDATED FOR 6 CHANNELS)
-# ==========================================
-class BehavioralCloningPolicy(nn.Module):
-    def __init__(self, state_dim=2, action_dim=2, hidden_dim=256, n_frames=2):
-        super().__init__()
-        self.n_frames = n_frames
-        
-        # We don't need pretrained weights for evaluation, we will load them from the checkpoint
-        resnet = models.resnet18(weights=None)
-        
-        # SURGERY: Accept stacked frames (6 channels)
-        self.input_channels = 3 * n_frames
-        resnet.conv1 = nn.Conv2d(
-            self.input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
-        )
-        
-        self.vision_backbone = nn.Sequential(*list(resnet.children())[:-1])
-        vision_feature_dim = 512 
-        
-        # Encoder for stacked states (4 dims)
-        self.state_encoder = nn.Sequential(
-            nn.Linear(state_dim * n_frames, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64)
-        )
-        
-        self.action_head = nn.Sequential(
-            nn.Linear(vision_feature_dim + 64, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim)
-        )
 
-    def forward(self, image, state):
-        img_features = self.vision_backbone(image)
-        img_features = img_features.view(img_features.size(0), -1) 
-        state_features = self.state_encoder(state) 
-        combined_features = torch.cat([img_features, state_features], dim=1) 
-        return self.action_head(combined_features) 
-
-# ==========================================
-# 2. Helper Functions
-# ==========================================
 def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
     """Extract current agent position [x, y] from observation."""
     agent_pos = np.asarray(obs["agent_pos"], dtype=np.float32)
@@ -84,9 +41,7 @@ def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
         return agent_pos
     return agent_pos[-1]
 
-# ==========================================
-# 3. Main Evaluation Loop
-# ==========================================
+
 def main(_):
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Loading model from {FLAGS.model_path} onto {device}...")
