@@ -1,18 +1,25 @@
-#!/usr/bin/env python3
 """
-Collect human-intervention trajectories for DAgger using a pretrained frame-stacking BC model.
+Collect human-intervention trajectories for DAgger using a frame-stacking ResNet BC model.
 """
 
 import os
 import sys
-import collections
+import warnings
+from typing import Dict, List
+from collections import deque
+
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 import numpy as np
 import gymnasium as gym
 import pygame
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.transforms as transforms
+import torchvision.transforms as T
 from torchvision import models
 from absl import app, flags
 from tqdm import tqdm
@@ -26,90 +33,47 @@ from envs.interactive_utils import (
 )
 from data.trajectory_recorder import TrajectoryRecorder
 from data.episode_saver import EpisodeSaver
+from scripts.bc_mlp_train import BehavioralCloningPolicy
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/pretrain_stack/best.pt", "Path to pretrained model")
-flags.DEFINE_string("output_dir", "data/dagger_stacked", "Directory to save data")
+flags.DEFINE_string("model_path", "models/bc_mlp/best.pt", "Path to pretrained model")
+flags.DEFINE_string("output_dir", "data/dagger1", "Directory to save collected data")
+flags.DEFINE_integer("num_seeds", 10, "Number of seeds to collect")
 flags.DEFINE_integer("fps", 10, "Control frequency")
+flags.DEFINE_float("window_scale", 1.0, "Window scale factor")
 flags.DEFINE_integer("max_steps", 300, "Max steps per episode")
-flags.DEFINE_float("window_scale", 1.0, "Window scale")
 flags.DEFINE_float("activation_radius", 30.0, "Mouse threshold")
+flags.DEFINE_integer("start_seed", 0, "Starting seed for deterministic sequences")
+flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using start_seed sequence")
 
-# ==========================================
-# 1. Model Architecture (Matching your Training Script)
-# ==========================================
-class BehavioralCloningPolicy(nn.Module):
-    def __init__(self, state_dim=2, action_dim=2, hidden_dim=256, n_frames=2):
-        super().__init__()
-        self.n_frames = n_frames
-        resnet = models.resnet18(weights=None)
-        self.input_channels = 3 * n_frames
-        resnet.conv1 = nn.Conv2d(self.input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.vision_backbone = nn.Sequential(*list(resnet.children())[:-1])
-        
-        self.state_encoder = nn.Sequential(
-            nn.Linear(state_dim * n_frames, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64)
-        )
-        self.action_head = nn.Sequential(
-            nn.Linear(512 + 64, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim)
-        )
 
-    def forward(self, image, state):
-        img_features = self.vision_backbone(image).view(image.size(0), -1) 
-        state_features = self.state_encoder(state) 
-        combined_features = torch.cat([img_features, state_features], dim=1) 
-        return self.action_head(combined_features)
+def get_latest_agent_pos(obs: Dict) -> np.ndarray:
+    agent_pos = np.asarray(obs["agent_pos"], dtype=np.float32)
+    return agent_pos if agent_pos.ndim == 1 else agent_pos[-1]
 
-# ==========================================
-# 2. Inference Preprocessing
-# ==========================================
-def preprocess_stacked_input(image_buffer, state_buffer, transform_fn, device):
-    """
-    Takes list of images/states, stacks them, and normalizes for the model.
-    """
-    # Image: List of (H,W,3) -> (B, F*C, 96, 96)
-    imgs = [torch.from_numpy(img).permute(2, 0, 1).float() / 255.0 for img in image_buffer]
-    imgs = [F.interpolate(img.unsqueeze(0), size=(96, 96), mode="bilinear").squeeze(0) for img in imgs]
-    
-    # Stack frames along channel dimension: (6, 96, 96)
-    stacked_img = torch.cat(imgs, dim=0)
-    
-    # Apply ImageNet normalization per 3-channel group
-    normalized_chunks = []
-    for i in range(len(image_buffer)):
-        chunk = stacked_img[i*3:(i+1)*3, :, :]
-        normalized_chunks.append(transform_fn(chunk))
-    
-    img_tensor = torch.cat(normalized_chunks, dim=0).unsqueeze(0).to(device)
-    
-    # State: List of (2,) -> (B, 4)
-    state_tensor = torch.from_numpy(np.concatenate(state_buffer)).float().unsqueeze(0).to(device)
-    
-    return img_tensor, state_tensor
 
-# ==========================================
-# 3. DAgger Loop
-# ==========================================
-def run_dagger_episode(env, model, transform_fn, stats, controller, recorder, env_seed, device, step_pbar, n_frames, frame_gap):
+def run_dagger_episode(
+    env, model, base_transform, norm_transform, stats, 
+    controller, recorder, env_seed, device, step_pbar, buffer_size
+):
     obs, _ = env.reset(seed=env_seed)
     controller.reset()
     recorder.reset()
     step_pbar.reset()
 
-    # Buffers to hold history for frame stacking
-    # We store observations every 'frame_gap' steps or just maintain a queue
-    # To match your training script's [-9, 0] gap:
-    image_history = collections.deque(maxlen=frame_gap + 1)
-    state_history = collections.deque(maxlen=frame_gap + 1)
+    # Buffers to hold history for frame stacking [t-9, ..., t]
+    image_buffer = deque(maxlen=buffer_size)
+    state_buffer = deque(maxlen=buffer_size)
 
-    terminated = truncated = success = quit_requested = False
+    # Pre-fill buffers with the initial state to avoid cold-start issues
+    init_pos = get_latest_agent_pos(obs)
+    init_img = base_transform(get_observation_image(env))
+    for _ in range(buffer_size):
+        image_buffer.append(init_img)
+        state_buffer.append(torch.tensor(init_pos, dtype=torch.float32))
+
+    terminated = truncated = quit_requested = False
     clock = pygame.time.Clock()
     step = 0
 
@@ -118,42 +82,43 @@ def run_dagger_episode(env, model, transform_fn, stats, controller, recorder, en
         if events.get("quit", False):
             quit_requested = True; break
 
-        agent_pos = obs["agent_pos"] if isinstance(obs, dict) else obs
+        # Allow 'R' to return to model control
+        if controller.state == ControlState.HUMAN_CONTROL:
+            if pygame.key.get_pressed()[pygame.K_r]:
+                controller.state = ControlState.MODEL_CONTROL
+
+        agent_pos = get_latest_agent_pos(obs)
         image_array = get_observation_image(env)
+        
+        # Update rolling history
+        image_buffer.append(base_transform(image_array))
+        state_buffer.append(torch.tensor(agent_pos, dtype=torch.float32))
 
-        # Update buffers
-        image_history.append(image_array)
-        state_history.append(agent_pos)
+        # Check for intervention
+        if controller.state != ControlState.HUMAN_CONTROL:
+            controller.try_activate_human_control(agent_pos)
 
-        # We need at least 'frame_gap + 1' frames to have the t-9 and t frames
-        if len(image_history) < (frame_gap + 1):
-            # During warm-up, we just take expert-ish steps or identity steps
-            action = agent_pos 
+        if controller.state == ControlState.HUMAN_CONTROL:
+            action = controller.get_human_action(agent_pos)
             is_human = True
         else:
-            # 1. Prepare Stacked Input: [history[0], history[-1]] -> frames t-9 and t
-            input_imgs = [image_history[0], image_history[-1]]
-            input_states = [state_history[0], state_history[-1]]
+            # 1. Prepare Stacked Inputs (t-9 and t)
+            img_stack = torch.cat([norm_transform(image_buffer[0]), 
+                                   norm_transform(image_buffer[-1])], dim=0).unsqueeze(0).to(device)
             
-            img_t, state_raw_t = preprocess_stacked_input(input_imgs, input_states, transform_fn, device)
+            # 2. Prepare Stacked States (Normalize each 2D state, then flatten to 1x4)
+            s_t9_norm = (state_buffer[0].to(device) - stats["s_mean"]) / stats["s_std"]
+            s_t_norm = (state_buffer[-1].to(device) - stats["s_mean"]) / stats["s_std"]
+            state_stack_norm = torch.cat([s_t9_norm, s_t_norm], dim=0).view(1, -1)
 
-            # 2. Decision Logic
-            controller.try_activate_human_control(agent_pos)
+            with torch.no_grad():
+                pred_norm = model(img_stack, state_stack_norm)
             
-            if controller.state == ControlState.HUMAN_CONTROL:
-                action = controller.get_human_action(agent_pos)
-                is_human = True
-            else:
-                # Normalize state using training stats
-                state_norm = (state_raw_t - stats["state_mean"]) / stats["state_std"]
-                with torch.no_grad():
-                    pred_norm = model(img_t, state_norm)
-                
-                # Unnormalize action
-                action = (pred_norm * stats["action_std"]) + stats["action_mean"]
-                action = action.squeeze(0).cpu().numpy().astype(np.float32)
-                action = np.clip(action, 0, 512)
-                is_human = False
+            # 3. Unnormalize Action
+            action_tensor = (pred_norm * stats["a_std"]) + stats["a_mean"]
+            action = action_tensor.squeeze(0).cpu().numpy().astype(np.float32)
+            action = np.clip(action, 0, 512)
+            is_human = False
 
         next_obs, reward, terminated, truncated, info = env.step(action)
         
@@ -175,47 +140,69 @@ def run_dagger_episode(env, model, transform_fn, stats, controller, recorder, en
     return terminated, truncated, any(recorder.success), any(recorder.is_human), quit_requested
 
 def main(_):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint = torch.load(FLAGS.model_path, map_location=device)
-    config = checkpoint["config"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    print(f"Loading model from {FLAGS.model_path} onto {device}...")
     
-    # Load model with correct stacking config
+    checkpoint = torch.load(FLAGS.model_path, map_location=device, weights_only=False)
+    config = checkpoint.get("config", {})
+    hidden_dim = int(config.get("hidden_dim", 256))
+    n_frames = int(config.get("n_frames", 2))
+    frame_gap = int(config.get("frame_gap", 9))
+    buffer_size = frame_gap + 1 
+    
     model = BehavioralCloningPolicy(
-        n_frames=config["n_frames"], 
-        hidden_dim=config["hidden_dim"]
+        state_dim=2, action_dim=2, hidden_dim=hidden_dim, n_frames=n_frames
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    # Expand stats to handle concatenated states (4 dims if n_frames=2)
-    # We repeat the 2D stats to cover the stacked 4D vector
-    s_mean = np.tile(checkpoint["state_mean"], config["n_frames"])
-    s_std = np.tile(checkpoint["state_std"], config["n_frames"])
-    
     stats = {
-        "state_mean": torch.tensor(s_mean, device=device),
-        "state_std": torch.tensor(s_std, device=device),
-        "action_mean": torch.tensor(checkpoint["action_mean"], device=device),
-        "action_std": torch.tensor(checkpoint["action_std"], device=device),
+        "s_mean": torch.tensor(checkpoint["state_mean"][:2], dtype=torch.float32).to(device),
+        "s_std": torch.tensor(checkpoint["state_std"][:2], dtype=torch.float32).to(device),
+        "a_mean": torch.tensor(checkpoint["action_mean"], dtype=torch.float32).to(device),
+        "a_std": torch.tensor(checkpoint["action_std"], dtype=torch.float32).to(device),
     }
 
-    transform_fn = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    base_transform = T.Compose([T.ToTensor(), T.Resize((96, 96), antialias=True)])
+    norm_transform = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     
-    env = gym.make("gym_pusht/PushT-v0", render_mode="human")
-    controller = InterventionController(activation_radius=FLAGS.activation_radius)
+    env = gym.make(
+        "gym_pusht/PushT-v0", 
+        obs_type="environment_state_agent_pos",
+        render_mode="human",
+        visualization_width=int(512 * FLAGS.window_scale)
+    )
+    
+    controller = InterventionController(activation_radius=FLAGS.activation_radius, window_scale=FLAGS.window_scale)
     recorder = TrajectoryRecorder()
     saver = EpisodeSaver(FLAGS.output_dir)
 
-    seeds = range(10) # Simplified seed loop
-    for seed in tqdm(seeds):
+    # --- RANDOM SEED LOGIC ---
+    if FLAGS.random_seeds:
+        # Use high range to avoid overlapping with common 0-100 training seeds
+        seeds = np.random.randint(0, 2**31 - 1, size=FLAGS.num_seeds).tolist()
+    else:
+        seeds = list(range(FLAGS.start_seed, FLAGS.start_seed + FLAGS.num_seeds))
+
+    print(f"Collecting {len(seeds)} episodes. Random mode: {FLAGS.random_seeds}")
+
+    for seed in tqdm(seeds, desc="Episodes"):
         res = run_dagger_episode(
-            env, model, transform_fn, stats, controller, recorder, seed, device, 
-            tqdm(total=FLAGS.max_steps, leave=False), config["n_frames"], config["frame_gap"]
+            env, model, base_transform, norm_transform, stats, 
+            controller, recorder, int(seed), device, 
+            tqdm(total=FLAGS.max_steps, leave=False), buffer_size
         )
-        if res[4]: break # Quit
         
-        data = recorder.finalize(seed, 0, -1, res[0], res[1], res[2])
-        saver.save(data, recorder.get_images(), seed, 0, res[2], res[3], True)
+        if res[4]: # quit_requested
+            print("\nCollection aborted by user.")
+            break 
+        
+        # data = recorder.finalize(env_seed, trial_idx, policy_seed, ...)
+        data = recorder.finalize(int(seed), 0, -1, res[0], res[1], res[2])
+        saver.save(data, recorder.get_images(), int(seed), 0, res[2], res[3], True)
+        
+    env.close()
+
 
 if __name__ == "__main__":
     app.run(main)
