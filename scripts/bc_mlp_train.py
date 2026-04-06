@@ -1,4 +1,6 @@
-"""Train a Vision-based Behavioral Cloning policy on lerobot/pusht with Frame Stacking.
+"""
+Train a Vision-based Behavioral Cloning policy on lerobot/pusht with Frame Stacking,
+SmoothL1 loss, and pretrained weights from ImageNet, with mlp for states/actions and ResNet for image frames.
 
 Usage:
 python scripts/standard_bc_training_new.py \
