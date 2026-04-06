@@ -1,0 +1,17 @@
+# Aligned with pyproject.toml [project.dependencies], plus direct imports from scripts/envs/data.
+absl-py
+datasets>=4.1.1
+einops>=0.8.0
+equinox>=0.13.0
+gym-pusht
+gymnasium
+jax>=0.7.0
+lerobot
+numpy
+opencv-python>=4.12.0.88
+optax>=0.2.6
+pygame
+pymunk<7
+torch
+torchvision
+tqdm
