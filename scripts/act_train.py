@@ -222,7 +222,7 @@ def train(config: TrainConfig) -> None:
 			states_norm = (states_b - state_mean_t) / state_std_t
 			target_actions = (action_chunk - action_mean_t.view(1, 1, -1)) / action_std_t.view(1, 1, -1)
 
-			pred_actions, mu, logvar = model(images, states_norm, target_actions, sample_posterior=True)
+			pred_actions, mu, logvar = model(images, states_norm, target_actions)
 			recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
 			kl_loss = ACTPolicy.kl_divergence(mu, logvar)
 			loss = recon_loss + epoch_kl_beta * kl_loss
@@ -260,7 +260,7 @@ def train(config: TrainConfig) -> None:
 				states_norm = (states_b - state_mean_t) / state_std_t
 				target_actions = (action_chunk - action_mean_t.view(1, 1, -1)) / action_std_t.view(1, 1, -1)
 
-				pred_actions, mu, logvar = model(images, states_norm, target_actions, sample_posterior=False)
+				pred_actions, mu, logvar = model(images, states_norm, target_actions)
 				recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
 				kl_loss = ACTPolicy.kl_divergence(mu, logvar)
 				loss = recon_loss + epoch_kl_beta * kl_loss

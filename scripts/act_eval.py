@@ -141,7 +141,7 @@ def main(_):
 			state_tensor_norm = (state_tensor - state_mean) / state_std
 
 			with torch.no_grad():
-				pred_norm_chunk, _, _ = model(image_tensor, state_tensor_norm, action_chunk=None, sample_posterior=False)
+				pred_norm_chunk, _, _ = model(image_tensor, state_tensor_norm, action_chunk=None)
 			pred_chunk = (pred_norm_chunk * action_std.view(1, 1, -1)) + action_mean.view(1, 1, -1)
 			pred_chunk_np = pred_chunk.squeeze(0).detach().cpu().numpy().astype(np.float32)
 			chunk_predictions.append((step, pred_chunk_np))
