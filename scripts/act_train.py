@@ -39,7 +39,10 @@ class TrainConfig:
 	latent_dim: int = 32
 	nhead: int = 8
 	num_decoder_layers: int = 6
-	kl_beta: float = 10.0
+	kl_beta: float = 0.01
+	kl_warmup_epochs: int = 50
+	kl_ramp_epochs: int = 50
+	image_shift_px: int = 4
 	ensemble_decay: float = 0.05
 
 
@@ -70,7 +73,25 @@ class ACTStepDataset(Dataset):
 		}
 
 
-def preprocess_image_batch(images: torch.Tensor, image_normalize) -> torch.Tensor:
+def random_shift_batch(images: torch.Tensor, max_shift: int) -> torch.Tensor:
+	if max_shift <= 0:
+		return images
+
+	b, c, h, w = images.shape
+	pad = int(max_shift)
+	padded = F.pad(images, (pad, pad, pad, pad), mode="replicate")
+	shift_y = torch.randint(0, 2 * pad + 1, (b,), device=images.device)
+	shift_x = torch.randint(0, 2 * pad + 1, (b,), device=images.device)
+
+	out = torch.empty_like(images)
+	for i in range(b):
+		y0 = int(shift_y[i].item())
+		x0 = int(shift_x[i].item())
+		out[i] = padded[i, :, y0 : y0 + h, x0 : x0 + w]
+	return out
+
+
+def preprocess_image_batch(images: torch.Tensor, image_normalize, random_shift_px: int = 0) -> torch.Tensor:
 	images = images.to(dtype=torch.float32)
 	if images.ndim != 4:
 		raise ValueError(f"Expected image batch with shape (B,C,H,W) or (B,H,W,C), got {tuple(images.shape)}")
@@ -82,6 +103,7 @@ def preprocess_image_batch(images: torch.Tensor, image_normalize) -> torch.Tenso
 		images = images / 255.0
 	if images.shape[-2:] != (96, 96):
 		images = F.interpolate(images, size=(96, 96), mode="bilinear", align_corners=False)
+	images = random_shift_batch(images, max_shift=random_shift_px)
 	images = image_normalize(images)
 	return images
 
@@ -111,6 +133,19 @@ def split_episode_indices(episode_index: np.ndarray, val_ratio: float, seed: int
 	if val_idx.size == 0:
 		val_idx = train_idx.copy()
 	return train_idx, val_idx
+
+
+def get_kl_beta(epoch_index: int, config: TrainConfig) -> float:
+	if epoch_index < config.kl_warmup_epochs:
+		return 0.0
+	if config.kl_ramp_epochs <= 0:
+		return float(config.kl_beta)
+
+	ramp_step = epoch_index - config.kl_warmup_epochs + 1
+	if ramp_step <= config.kl_ramp_epochs:
+		progress = ramp_step / float(config.kl_ramp_epochs)
+		return float(config.kl_beta) * progress
+	return float(config.kl_beta)
 
 
 def train(config: TrainConfig) -> None:
@@ -166,6 +201,8 @@ def train(config: TrainConfig) -> None:
 	best_val = float("inf")
 
 	for epoch in range(1, config.epochs + 1):
+		epoch_index = epoch - 1
+		epoch_kl_beta = get_kl_beta(epoch_index, config)
 		model.train()
 		train_loss_sum = 0.0
 		train_recon_sum = 0.0
@@ -173,7 +210,11 @@ def train(config: TrainConfig) -> None:
 		train_batches = 0
 
 		for batch in tqdm(train_loader, desc=f"Train {epoch}/{config.epochs}", leave=False):
-			images = preprocess_image_batch(batch["image"].to(device), image_normalize)
+			images = preprocess_image_batch(
+				batch["image"].to(device),
+				image_normalize,
+				random_shift_px=config.image_shift_px,
+			)
 			states_b = batch["state"].to(device)
 			action_chunk = batch["action_chunk"].to(device)
 			action_is_pad_b = batch["action_is_pad"].to(device)
@@ -184,7 +225,7 @@ def train(config: TrainConfig) -> None:
 			pred_actions, mu, logvar = model(images, states_norm, target_actions, sample_posterior=True)
 			recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
 			kl_loss = ACTPolicy.kl_divergence(mu, logvar)
-			loss = recon_loss + config.kl_beta * kl_loss
+			loss = recon_loss + epoch_kl_beta * kl_loss
 
 			optimizer.zero_grad(set_to_none=True)
 			loss.backward()
@@ -207,7 +248,11 @@ def train(config: TrainConfig) -> None:
 		val_batches = 0
 		with torch.no_grad():
 			for batch in tqdm(val_loader, desc=f"Val {epoch}/{config.epochs}", leave=False):
-				images = preprocess_image_batch(batch["image"].to(device), image_normalize)
+				images = preprocess_image_batch(
+					batch["image"].to(device),
+					image_normalize,
+					random_shift_px=0,
+				)
 				states_b = batch["state"].to(device)
 				action_chunk = batch["action_chunk"].to(device)
 				action_is_pad_b = batch["action_is_pad"].to(device)
@@ -218,7 +263,7 @@ def train(config: TrainConfig) -> None:
 				pred_actions, mu, logvar = model(images, states_norm, target_actions, sample_posterior=False)
 				recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
 				kl_loss = ACTPolicy.kl_divergence(mu, logvar)
-				loss = recon_loss + config.kl_beta * kl_loss
+				loss = recon_loss + epoch_kl_beta * kl_loss
 
 				val_loss_sum += float(loss.item())
 				val_recon_sum += float(recon_loss.item())
@@ -254,6 +299,7 @@ def train(config: TrainConfig) -> None:
 
 		print(
 			f"Epoch {epoch:03d}/{config.epochs} | "
+			f"kl_beta={epoch_kl_beta:.6f} | "
 			f"train={train_loss:.6f} (recon={train_recon:.6f}, kl={train_kl:.6f}) | "
 			f"val={val_loss:.6f} (recon={val_recon:.6f}, kl={val_kl:.6f})"
 		)
@@ -280,17 +326,20 @@ def parse_args() -> TrainConfig:
 	parser.add_argument("--output_dir", type=str, default="models/act")
 	parser.add_argument("--seed", type=int, default=42)
 	parser.add_argument("--val_ratio", type=float, default=0.1)
-	parser.add_argument("--epochs", type=int, default=50)
-	parser.add_argument("--batch_size", type=int, default=64)
-	parser.add_argument("--learning_rate", type=float, default=1e-4)
-	parser.add_argument("--weight_decay", type=float, default=1e-5)
-	parser.add_argument("--horizon", type=int, default=20)
-	parser.add_argument("--hidden_dim", type=int, default=256)
+	parser.add_argument("--epochs", type=int, default=200)
+	parser.add_argument("--batch_size", type=int, default=16)
+	parser.add_argument("--learning_rate", type=float, default=1e-5)
+	parser.add_argument("--weight_decay", type=float, default=1e-4)
+	parser.add_argument("--horizon", type=int, default=50)
+	parser.add_argument("--hidden_dim", type=int, default=512)
 	parser.add_argument("--latent_dim", type=int, default=32)
 	parser.add_argument("--nhead", type=int, default=8)
-	parser.add_argument("--num_decoder_layers", type=int, default=6)
-	parser.add_argument("--kl_beta", type=float, default=10.0)
-	parser.add_argument("--ensemble_decay", type=float, default=0.05)
+	parser.add_argument("--num_decoder_layers", type=int, default=2)
+	parser.add_argument("--kl_beta", type=float, default=0.01)
+	parser.add_argument("--kl_warmup_epochs", type=int, default=50)
+	parser.add_argument("--kl_ramp_epochs", type=int, default=50)
+	parser.add_argument("--image_shift_px", type=int, default=4)
+	parser.add_argument("--ensemble_decay", type=float, default=0.01)
 	args = parser.parse_args()
 
 	return TrainConfig(
@@ -309,6 +358,9 @@ def parse_args() -> TrainConfig:
 		nhead=args.nhead,
 		num_decoder_layers=args.num_decoder_layers,
 		kl_beta=args.kl_beta,
+		kl_warmup_epochs=args.kl_warmup_epochs,
+		kl_ramp_epochs=args.kl_ramp_epochs,
+		image_shift_px=args.image_shift_px,
 		ensemble_decay=args.ensemble_decay,
 	)
 

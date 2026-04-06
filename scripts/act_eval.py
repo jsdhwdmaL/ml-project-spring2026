@@ -69,12 +69,12 @@ def main(_):
 	checkpoint = torch.load(FLAGS.model_path, map_location=device, weights_only=False)
 	config = checkpoint.get("config", {})
 
-	horizon = int(config.get("horizon", 20))
-	hidden_dim = int(config.get("hidden_dim", 256))
+	horizon = int(config.get("horizon", 50))
+	hidden_dim = int(config.get("hidden_dim", 512))
 	latent_dim = int(config.get("latent_dim", 32))
 	nhead = int(config.get("nhead", 8))
-	num_decoder_layers = int(config.get("num_decoder_layers", 6))
-	ckpt_decay = float(config.get("ensemble_decay", 0.05))
+	num_decoder_layers = int(config.get("num_decoder_layers", 2))
+	ckpt_decay = float(config.get("ensemble_decay", 0.01))
 	ensemble_decay = ckpt_decay if FLAGS.ensemble_decay < 0 else FLAGS.ensemble_decay
 
 	model = ACTPolicy(
