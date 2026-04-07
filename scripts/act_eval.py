@@ -33,6 +33,8 @@ flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
 flags.DEFINE_float("ensemble_decay", -1.0, "Override temporal ensembling decay; <0 uses checkpoint")
 flags.DEFINE_boolean("save_video", True, "Save episodes as an MP4 video")
 flags.DEFINE_string("video_dir", "videos/act", "Directory to save episode videos")
+flags.DEFINE_boolean("temporal_agg", True, "Enable temporal ensembling (query model every step, blend predictions)")
+flags.DEFINE_integer("query_frequency", 1, "When temporal_agg is disabled, how many steps to execute from each predicted chunk before re-querying")
 
 
 def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
@@ -40,30 +42,6 @@ def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
     if agent_pos.ndim == 1:
         return agent_pos
     return agent_pos[-1]
-
-
-def ensemble_current_action(
-    t_step: int,
-    predictions: List[Tuple[int, np.ndarray]],
-    horizon: int,
-    decay: float,
-) -> np.ndarray:
-    candidates: List[np.ndarray] = []
-    weights: List[float] = []
-
-    for start_step, chunk in predictions:
-        offset = t_step - start_step
-        if 0 <= offset < horizon:
-            candidates.append(chunk[offset])
-            weights.append(float(np.exp(-decay * offset)))
-
-    if not candidates:
-        raise ValueError("No valid chunk predictions available for temporal ensembling")
-
-    stacked = np.stack(candidates, axis=0)
-    w = np.asarray(weights, dtype=np.float32)
-    w = w / np.sum(w)
-    return np.sum(stacked * w[:, None], axis=0)
 
 
 def capture_frame(env) -> Optional[np.ndarray]:
@@ -95,6 +73,12 @@ def main(_):
     ckpt_decay = float(config.get("ensemble_decay", 0.01))
     ensemble_decay = ckpt_decay if FLAGS.ensemble_decay < 0 else FLAGS.ensemble_decay
 
+    # When temporal ensembling is on we must query the model every step.
+    # When it is off we query every query_frequency steps and execute that
+    # many actions from the chunk before re-querying.
+    temporal_agg: bool = FLAGS.temporal_agg
+    query_frequency: int = 1 if temporal_agg else max(1, FLAGS.query_frequency)
+
     model = ACTPolicy(
         state_dim=2,
         action_dim=2,
@@ -112,6 +96,8 @@ def main(_):
     state_std = torch.tensor(checkpoint["state_std"], dtype=torch.float32, device=device)
     action_mean = torch.tensor(checkpoint["action_mean"], dtype=torch.float32, device=device)
     action_std = torch.tensor(checkpoint["action_std"], dtype=torch.float32, device=device)
+
+    action_dim = int(action_mean.shape[-1])
 
     base_transform = T.Compose([
         T.ToTensor(),
@@ -144,7 +130,20 @@ def main(_):
         success = False
         clock = pygame.time.Clock()
 
-        chunk_predictions: List[Tuple[int, np.ndarray]] = []
+        # --------------- temporal ensembling state ---------------
+        # all_time_actions[t_query, t_exec] stores the action predicted
+        # at query step t_query for execution at absolute step t_exec.
+        # Shape: [max_steps, max_steps + horizon, action_dim]
+        # Allocated once per episode so indexing stays simple.
+        if temporal_agg:
+            all_time_actions = torch.zeros(
+                (FLAGS.max_steps, FLAGS.max_steps + horizon, action_dim),
+                dtype=torch.float32,
+                device=device,
+            )
+ 
+        # Cache the last predicted chunk when not using temporal ensembling
+        cached_chunk: Optional[np.ndarray] = None
 
         while not (terminated or truncated):
             for event in pygame.event.get():
@@ -161,14 +160,46 @@ def main(_):
             state_tensor = torch.tensor(agent_pos, dtype=torch.float32, device=device).unsqueeze(0)
             state_tensor_norm = (state_tensor - state_mean) / state_std
 
-            with torch.no_grad():
-                pred_norm_chunk, _, _ = model(image_tensor, state_tensor_norm, action_chunk=None)
-            pred_chunk = (pred_norm_chunk * action_std.view(1, 1, -1)) + action_mean.view(1, 1, -1)
-            pred_chunk_np = pred_chunk.squeeze(0).detach().cpu().numpy().astype(np.float32)
-            chunk_predictions.append((step, pred_chunk_np))
+            # ---- decide whether to query the model this step ----
+            if step % query_frequency == 0:
+                with torch.no_grad():
+                    pred_norm_chunk, _, _ = model(image_tensor, state_tensor_norm, action_chunk=None)
+                # pred_norm_chunk: [1, horizon, action_dim]
+                pred_chunk = (pred_norm_chunk * action_std.view(1, 1, -1)) + action_mean.view(1, 1, -1)
+                # [1, horizon, action_dim]
+ 
+                if temporal_agg:
+                    # Write this chunk into the row for the current step.
+                    # Columns t_exec = step .. step+horizon hold the predictions.
+                    all_time_actions[[step], step : step + horizon] = pred_chunk
+                else:
+                    # Store the raw numpy chunk for replay over the next
+                    # query_frequency steps.
+                    cached_chunk = pred_chunk.squeeze(0).cpu().numpy().astype(np.float32)
 
-            action = ensemble_current_action(step, chunk_predictions, horizon=horizon, decay=ensemble_decay)
-            action = np.clip(action, 0.0, 512.0)
+            # ---- select the action for this step ----
+            if temporal_agg:
+                # Column `step` across all query rows gives every prediction
+                # ever made for this execution timestep.
+                start = max(0, step - horizon + 1)
+                actions_for_step = all_time_actions[start : step + 1, step]
+ 
+                # Exponential weights: index 0 = oldest query, index K-1 = newest.
+                # We want to weight *newer* predictions more heavily, so assign
+                # weight exp(-k * (K-1-j)) ... equivalently, reverse the array
+                # and weight exp(-k * offset) where offset=0 is the newest.
+                k = ensemble_decay
+                exp_weights = np.exp(-k * np.arange(len(actions_for_step) - 1, -1, -1))
+                exp_weights = exp_weights / exp_weights.sum()
+                exp_weights_t = torch.from_numpy(exp_weights).float().to(device).unsqueeze(1)
+ 
+                action_np = (actions_for_step * exp_weights_t).sum(dim=0).cpu().numpy().astype(np.float32)
+            else:
+                # Execute the cached chunk at the appropriate offset.
+                offset = step % query_frequency
+                action_np = cached_chunk[offset].astype(np.float32)
+
+            action = np.clip(action_np, 0.0, 512.0)
 
             obs, reward, terminated, truncated, info = env.step(action)
             step_success = bool(info.get("is_success", terminated)) if isinstance(info, dict) else bool(terminated)
@@ -204,7 +235,7 @@ def main(_):
             print(f"Episode {i + 1}/{FLAGS.num_seeds} (seed={seed}) - FAILED ({step} steps)")
 
         # pause for 1 second on final state
-        if FLAGS.save_video:
+        if FLAGS.save_video and frames:
             for j in range(FLAGS.fps):
                 frames.append(frames[-1])
 
@@ -213,6 +244,7 @@ def main(_):
     print("=" * 60)
 
     if FLAGS.save_video and frames:
+        os.makedirs(FLAGS.video_dir, exist_ok=True)  # auto-create dir
         video_path = os.path.join(FLAGS.video_dir, time.strftime("%Y-%m-%d-%H-%M-%S.mp4"))
         imageio.mimwrite(video_path, frames, fps=FLAGS.fps)
         print(f"Saved video to {video_path}")

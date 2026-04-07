@@ -39,7 +39,7 @@ class TrainConfig:
     latent_dim: int = 32
     nhead: int = 8
     num_encoder_layers: int = 4
-    num_decoder_layers: int = 4
+    num_decoder_layers: int = 7
     kl_beta: float = 10 # WIP: adjust to 50 if necessary...
     image_shift_px: int = 4
     ensemble_decay: float = 0.05

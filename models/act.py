@@ -24,7 +24,7 @@ class ACTPolicy(nn.Module):
         latent_dim: int = 32,
         nhead: int = 8,
         num_encoder_layers: int = 4,
-        num_decoder_layers: int = 4,
+        num_decoder_layers: int = 7,
     ):
         super().__init__()
         self.horizon = horizon
