@@ -30,7 +30,7 @@ class TrainConfig:
     output_dir: str = "models/act"
     seed: int = 42
     val_ratio: float = 0.1
-    epochs: int = 200
+    epochs: int = 500
     batch_size: int = 64
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
@@ -134,7 +134,6 @@ def split_episode_indices(episode_index: np.ndarray, val_ratio: float, seed: int
     return train_idx, val_idx
 
 
-
 def train(config: TrainConfig) -> None:
     os.makedirs(config.output_dir, exist_ok=True)
     np.random.seed(config.seed)
@@ -178,6 +177,9 @@ def train(config: TrainConfig) -> None:
         num_encoder_layers=config.num_encoder_layers,
         num_decoder_layers=config.num_decoder_layers,
     ).to(device)
+
+    num_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"training ACT with {num_parameters} trainable parameters")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
 
