@@ -30,7 +30,7 @@ class TrainConfig:
     output_dir: str = "models/act"
     seed: int = 42
     val_ratio: float = 0.1
-    epochs: int = 50
+    epochs: int = 200
     batch_size: int = 64
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
@@ -175,6 +175,7 @@ def train(config: TrainConfig) -> None:
         hidden_dim=config.hidden_dim,
         latent_dim=config.latent_dim,
         nhead=config.nhead,
+        num_encoder_layers=config.num_encoder_layers,
         num_decoder_layers=config.num_decoder_layers,
     ).to(device)
 
@@ -305,45 +306,28 @@ def train(config: TrainConfig) -> None:
 
 
 def parse_args() -> TrainConfig:
+    defaults = TrainConfig()
     parser = argparse.ArgumentParser(description="Train ACT on lerobot/pusht")
-    parser.add_argument("--dataset_id", type=str, default="lerobot/pusht")
-    parser.add_argument("--split", type=str, default="train")
-    parser.add_argument("--output_dir", type=str, default="models/act")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--val_ratio", type=float, default=0.1)
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--horizon", type=int, default=50)
-    parser.add_argument("--hidden_dim", type=int, default=512)
-    parser.add_argument("--latent_dim", type=int, default=32)
-    parser.add_argument("--nhead", type=int, default=8)
-    parser.add_argument("--num_decoder_layers", type=int, default=2)
-    parser.add_argument("--kl_beta", type=float, default=0.01)
-    parser.add_argument("--image_shift_px", type=int, default=4)
-    parser.add_argument("--ensemble_decay", type=float, default=0.01)
+    parser.add_argument("--dataset_id", type=str, default=defaults.dataset_id)
+    parser.add_argument("--split", type=str, default=defaults.split)
+    parser.add_argument("--output_dir", type=str, default=defaults.output_dir)
+    parser.add_argument("--seed", type=int, default=defaults.seed)
+    parser.add_argument("--val_ratio", type=float, default=defaults.val_ratio)
+    parser.add_argument("--epochs", type=int, default=defaults.epochs)
+    parser.add_argument("--batch_size", type=int, default=defaults.batch_size)
+    parser.add_argument("--learning_rate", type=float, default=defaults.learning_rate)
+    parser.add_argument("--weight_decay", type=float, default=defaults.weight_decay)
+    parser.add_argument("--horizon", type=int, default=defaults.horizon)
+    parser.add_argument("--hidden_dim", type=int, default=defaults.hidden_dim)
+    parser.add_argument("--latent_dim", type=int, default=defaults.latent_dim)
+    parser.add_argument("--nhead", type=int, default=defaults.nhead)
+    parser.add_argument("--num_encoder_layers", type=int, default=defaults.num_encoder_layers)
+    parser.add_argument("--num_decoder_layers", type=int, default=defaults.num_decoder_layers)
+    parser.add_argument("--kl_beta", type=float, default=defaults.kl_beta)
+    parser.add_argument("--image_shift_px", type=int, default=defaults.image_shift_px)
+    parser.add_argument("--ensemble_decay", type=float, default=defaults.ensemble_decay)
     args = parser.parse_args()
-
-    return TrainConfig(
-        dataset_id=args.dataset_id,
-        split=args.split,
-        output_dir=args.output_dir,
-        seed=args.seed,
-        val_ratio=args.val_ratio,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        horizon=args.horizon,
-        hidden_dim=args.hidden_dim,
-        latent_dim=args.latent_dim,
-        nhead=args.nhead,
-        num_decoder_layers=args.num_decoder_layers,
-        kl_beta=args.kl_beta,
-        image_shift_px=args.image_shift_px,
-        ensemble_decay=args.ensemble_decay,
-    )
+    return TrainConfig(**vars(args))
 
 
 if __name__ == "__main__":
