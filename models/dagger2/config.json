@@ -1,0 +1,18 @@
+{
+  "model_path": "models/dagger1/best.pt",
+  "data_dir": "data/dagger2",
+  "original_dataset_id": "lerobot/pusht",
+  "original_split": "train",
+  "output_dir": "models/dagger2",
+  "include_autonomous": false,
+  "include_failed": false,
+  "only_human_steps": false,
+  "mix_dagger_ratio": 4.0,
+  "mix_original_ratio": 6.0,
+  "val_ratio": 0.1,
+  "epochs": 20,
+  "batch_size": 64,
+  "learning_rate": 1e-05,
+  "weight_decay": 1e-05,
+  "seed": 42
+}
