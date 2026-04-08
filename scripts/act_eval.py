@@ -28,7 +28,7 @@ flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
-flags.DEFINE_float("ensemble_decay", -1.0, "Override temporal ensembling decay; <0 uses checkpoint")
+flags.DEFINE_float("ensemble_decay", 0.05, "Override temporal ensembling decay; <0 uses checkpoint")
 
 
 def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
