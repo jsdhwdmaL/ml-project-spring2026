@@ -2,8 +2,8 @@
 
 Usage:
 python scripts/target_data_collection.py \
-    --output_dir "data/target_collection" \
-    --save_images=true
+    --output_dir "data/data_collection" \
+    --save_images=true \
 """
 
 import os
