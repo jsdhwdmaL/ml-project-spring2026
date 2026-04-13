@@ -30,7 +30,7 @@ class TrainConfig:
     output_dir: str = "models/act"
     seed: int = 42
     val_ratio: float = 0.1
-    epochs: int = 500
+    epochs: int = 50
     batch_size: int = 64
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
