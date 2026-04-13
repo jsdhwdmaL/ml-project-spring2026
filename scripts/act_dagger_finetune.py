@@ -670,7 +670,7 @@ def parse_args() -> FinetuneConfig:
     parser.add_argument("--hidden_dim", type=int, default=512)
     parser.add_argument("--latent_dim", type=int, default=32)
     parser.add_argument("--nhead", type=int, default=8)
-    parser.add_argument("--num_decoder_layers", type=int, default=7)
+    parser.add_argument("--num_decoder_layers", type=int, default=4)
     parser.add_argument("--ensemble_decay", type=float, default=0.05)
     args = parser.parse_args()
 

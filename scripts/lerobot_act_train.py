@@ -221,7 +221,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train LeRobot ACT on lerobot/pusht with local save")
     parser.add_argument("--dataset_id", type=str, default="lerobot/pusht")
     parser.add_argument("--split", type=str, default="train")
-    parser.add_argument("--output_dir", type=str, default="models/lerobot_act")
+    parser.add_argument("--output_dir", type=str, default="models/lerobot_act2")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "mps", "cpu"])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch_size", type=int, default=32)

@@ -24,12 +24,12 @@ if REPO_ROOT not in sys.path:
 import gym_pusht  # noqa: F401
 from envs.interactive_utils import ControlState, draw_status_overlay, get_observation_image
 from lerobot.policies.act.configuration_act import ACTConfig
-from lerobot.policies.act.modeling_act import ACTPolicy
+from lerobot.policies.act.modeling_act import ACTPolicy, ACTTemporalEnsembler
 from lerobot.policies.factory import make_pre_post_processors
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/lerobot_act", "Path to model directory or ckpt_step_*.pt checkpoint")
+flags.DEFINE_string("model_path", "models/lerobot_act_og_batch64", "Path to model directory or ckpt_step_*.pt checkpoint")
 flags.DEFINE_integer("num_seeds", 5, "Number of episodes to evaluate")
 flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using 0..num_seeds-1")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz")
@@ -38,6 +38,11 @@ flags.DEFINE_integer("max_steps", 400, "Maximum steps per episode")
 flags.DEFINE_string("device", "auto", "Device: auto|cuda|mps|cpu")
 flags.DEFINE_float("action_min", 0.0, "Minimum action value after postprocessing")
 flags.DEFINE_float("action_max", 512.0, "Maximum action value after postprocessing")
+flags.DEFINE_float(
+	"temporal_ensemble_coeff",
+	0.01,
+	"Temporal ensembling coefficient. Set >=0 to override config and enable ensembling; -1 keeps model config.",
+)
 
 
 def resolve_device(device_name: str) -> torch.device:
@@ -112,12 +117,45 @@ def load_policy_and_processors(model_path: Path, device: torch.device):
 			"Expected artifacts saved by scripts/lerobot_act_train.py"
 		)
 
-	preprocessor, postprocessor = make_pre_post_processors(policy.config, pretrained_path=str(processor_root))
+	preprocessor, postprocessor = make_pre_post_processors(
+		policy.config,
+		pretrained_path=str(processor_root),
+		preprocessor_overrides={
+			"device_processor": {
+				"device": device.type,
+				"float_dtype": None,
+			}
+		},
+		postprocessor_overrides={
+			"device_processor": {
+				"device": "cpu",
+				"float_dtype": None,
+			}
+		},
+	)
 	set_processor_device(preprocessor, device.type)
 
 	policy.to(device)
 	policy.eval()
 	return policy, preprocessor, postprocessor
+
+
+def apply_temporal_ensembling_override(policy: ACTPolicy) -> None:
+	coeff = float(FLAGS.temporal_ensemble_coeff)
+	if coeff < 0:
+		active_coeff = getattr(policy.config, "temporal_ensemble_coeff", None)
+		if active_coeff is None:
+			print("Temporal ensembling: disabled")
+		else:
+			print(f"Temporal ensembling: enabled from config (coeff={active_coeff})")
+		return
+
+	# LeRobot ACT expects one action step per query when temporal ensembling is active.
+	policy.config.n_action_steps = 1
+	policy.config.temporal_ensemble_coeff = coeff
+	policy.temporal_ensembler = ACTTemporalEnsembler(coeff, policy.config.chunk_size)
+	policy.reset()
+	print(f"Temporal ensembling: enabled via override (coeff={coeff})")
 
 
 def main(_):
@@ -129,6 +167,8 @@ def main(_):
 		raise ValueError("max_steps must be > 0")
 	if FLAGS.action_min > FLAGS.action_max:
 		raise ValueError("action_min must be <= action_max")
+	if FLAGS.temporal_ensemble_coeff < -1.0:
+		raise ValueError("temporal_ensemble_coeff must be -1 (use config) or >= 0")
 
 	device = resolve_device(FLAGS.device)
 	model_path = Path(FLAGS.model_path)
@@ -137,6 +177,7 @@ def main(_):
 
 	print(f"Loading LeRobot ACT artifacts from {model_path} onto {device}...")
 	policy, preprocessor, postprocessor = load_policy_and_processors(model_path, device)
+	apply_temporal_ensembling_override(policy)
 
 	image_transform = T.Compose([
 		T.ToTensor(),
