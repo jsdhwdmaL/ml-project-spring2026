@@ -13,6 +13,7 @@ import pygame
 from absl import app, flags
 import imageio
 import time
+from typing import Dict, List, Optional
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
