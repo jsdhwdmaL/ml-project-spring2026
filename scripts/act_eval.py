@@ -11,10 +11,12 @@ import torchvision.transforms as T
 import gymnasium as gym
 import pygame
 from absl import app, flags
+import imageio
+import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
-	sys.path.insert(0, REPO_ROOT)
+    sys.path.insert(0, REPO_ROOT)
 
 import gym_pusht
 from envs.interactive_utils import get_observation_image, draw_status_overlay, ControlState
@@ -28,159 +30,227 @@ flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
-flags.DEFINE_float("ensemble_decay", 0.05, "Override temporal ensembling decay; <0 uses checkpoint")
+flags.DEFINE_float("ensemble_decay", -1.0, "Override temporal ensembling decay; <0 uses checkpoint")
+flags.DEFINE_boolean("save_video", True, "Save episodes as an MP4 video")
+flags.DEFINE_string("video_dir", "videos/act", "Directory to save episode videos")
+flags.DEFINE_boolean("temporal_agg", True, "Enable temporal ensembling (query model every step, blend predictions)")
+flags.DEFINE_integer("query_frequency", 1, "When temporal_agg is disabled, how many steps to execute from each predicted chunk before re-querying")
 
 
 def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
-	agent_pos = np.asarray(obs["agent_pos"], dtype=np.float32)
-	if agent_pos.ndim == 1:
-		return agent_pos
-	return agent_pos[-1]
+    agent_pos = np.asarray(obs["agent_pos"], dtype=np.float32)
+    if agent_pos.ndim == 1:
+        return agent_pos
+    return agent_pos[-1]
 
 
-def ensemble_current_action(
-	t_step: int,
-	predictions: List[Tuple[int, np.ndarray]],
-	horizon: int,
-	decay: float,
-) -> np.ndarray:
-	candidates: List[np.ndarray] = []
-	weights: List[float] = []
+def capture_frame(env) -> Optional[np.ndarray]:
+    """Grab the current pygame window surface as an RGB numpy array."""
+    surface = pygame.display.get_surface()
+    if surface is None:
+        return None
+    return np.transpose(pygame.surfarray.array3d(surface), (1, 0, 2))  # (H, W, 3)
 
-	for start_step, chunk in predictions:
-		offset = t_step - start_step
-		if 0 <= offset < horizon:
-			candidates.append(chunk[offset])
-			weights.append(float(np.exp(-decay * offset)))
 
-	if not candidates:
-		raise ValueError("No valid chunk predictions available for temporal ensembling")
-
-	stacked = np.stack(candidates, axis=0)
-	w = np.asarray(weights, dtype=np.float32)
-	w = w / np.sum(w)
-	return np.sum(stacked * w[:, None], axis=0)
-
+def save_episode_video(frames: List[np.ndarray], path: str, fps: int) -> None:
+    if not frames:
+        return
+    print(f"Saved video to {path}")
 
 def main(_):
-	device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-	print(f"Loading ACT model from {FLAGS.model_path} onto {device}...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    print(f"Loading ACT model from {FLAGS.model_path} onto {device}...")
 
-	checkpoint = torch.load(FLAGS.model_path, map_location=device, weights_only=False)
-	config = checkpoint.get("config", {})
+    checkpoint = torch.load(FLAGS.model_path, map_location=device, weights_only=False)
+    config = checkpoint.get("config", {})
 
-	horizon = int(config.get("horizon", 50))
-	hidden_dim = int(config.get("hidden_dim", 512))
-	latent_dim = int(config.get("latent_dim", 32))
-	nhead = int(config.get("nhead", 8))
-	num_decoder_layers = int(config.get("num_decoder_layers", 2))
-	ckpt_decay = float(config.get("ensemble_decay", 0.01))
-	ensemble_decay = ckpt_decay if FLAGS.ensemble_decay < 0 else FLAGS.ensemble_decay
+    horizon = int(config.get("horizon", 50))
+    hidden_dim = int(config.get("hidden_dim", 512))
+    latent_dim = int(config.get("latent_dim", 32))
+    nhead = int(config.get("nhead", 8))
+    num_encoder_layers = int(config.get("num_encoder_layers", 4))
+    num_decoder_layers = int(config.get("num_decoder_layers", 4))
+    ckpt_decay = float(config.get("ensemble_decay", 0.01))
+    ensemble_decay = ckpt_decay if FLAGS.ensemble_decay < 0 else FLAGS.ensemble_decay
 
-	model = ACTPolicy(
-		state_dim=2,
-		action_dim=2,
-		horizon=horizon,
-		hidden_dim=hidden_dim,
-		latent_dim=latent_dim,
-		nhead=nhead,
-		num_decoder_layers=num_decoder_layers,
-	).to(device)
-	model.load_state_dict(checkpoint["model_state_dict"])
-	model.eval()
+    # When temporal ensembling is on we must query the model every step.
+    # When it is off we query every query_frequency steps and execute that
+    # many actions from the chunk before re-querying.
+    temporal_agg: bool = FLAGS.temporal_agg
+    query_frequency: int = 1 if temporal_agg else max(1, FLAGS.query_frequency)
 
-	state_mean = torch.tensor(checkpoint["state_mean"], dtype=torch.float32, device=device)
-	state_std = torch.tensor(checkpoint["state_std"], dtype=torch.float32, device=device)
-	action_mean = torch.tensor(checkpoint["action_mean"], dtype=torch.float32, device=device)
-	action_std = torch.tensor(checkpoint["action_std"], dtype=torch.float32, device=device)
+    model = ACTPolicy(
+        state_dim=2,
+        action_dim=2,
+        horizon=horizon,
+        hidden_dim=hidden_dim,
+        latent_dim=latent_dim,
+        nhead=nhead,
+        num_encoder_layers=num_encoder_layers,
+        num_decoder_layers=num_decoder_layers,
+    ).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
 
-	base_transform = T.Compose([
-		T.ToTensor(),
-		T.Resize((96, 96), antialias=True),
-	])
-	normalize_transform = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    state_mean = torch.tensor(checkpoint["state_mean"], dtype=torch.float32, device=device)
+    state_std = torch.tensor(checkpoint["state_std"], dtype=torch.float32, device=device)
+    action_mean = torch.tensor(checkpoint["action_mean"], dtype=torch.float32, device=device)
+    action_std = torch.tensor(checkpoint["action_std"], dtype=torch.float32, device=device)
 
-	window_size = int(512 * FLAGS.window_scale)
-	env = gym.make(
-		"gym_pusht/PushT-v0",
-		obs_type="environment_state_agent_pos",
-		render_mode="human",
-		visualization_width=window_size,
-		visualization_height=window_size,
-	)
-	env = gym.wrappers.TimeLimit(env, max_episode_steps=FLAGS.max_steps)
+    action_dim = int(action_mean.shape[-1])
 
-	print("\nStarting ACT Evaluation...")
-	print(f"H={horizon} | ensemble_decay={ensemble_decay}")
-	success_count = 0
+    base_transform = T.Compose([
+        T.ToTensor(),
+        T.Resize((96, 96), antialias=True),
+    ])
+    normalize_transform = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
-	seeds = np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist() if FLAGS.random_seeds else range(FLAGS.num_seeds)
-	for i, seed in enumerate(seeds):
-		obs, _ = env.reset(seed=int(seed))
-		step = 0
-		terminated = False
-		truncated = False
-		success = False
-		clock = pygame.time.Clock()
+    window_size = int(512 * FLAGS.window_scale)
+    env = gym.make(
+        "gym_pusht/PushT-v0",
+        obs_type="environment_state_agent_pos",
+        render_mode="human",
+        visualization_width=window_size,
+        visualization_height=window_size,
+    )
+    env = gym.wrappers.TimeLimit(env, max_episode_steps=FLAGS.max_steps)
 
-		chunk_predictions: List[Tuple[int, np.ndarray]] = []
+    print("\nStarting ACT Evaluation...")
+    print(f"H={horizon} | ensemble_decay={ensemble_decay}")
+    success_count = 0
 
-		while not (terminated or truncated):
-			for event in pygame.event.get():
-				if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_q):
-					print("Evaluation aborted by user.")
-					env.close()
-					return
+    seeds = np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist() if FLAGS.random_seeds else range(FLAGS.num_seeds)
+    frames: List[np.ndarray] = [] # for video export
 
-			agent_pos = get_agent_pos_from_obs(obs)
-			img_array = get_observation_image(env)
+    for i, seed in enumerate(seeds):
+        obs, _ = env.reset(seed=int(seed))
+        step = 0
+        terminated = False
+        truncated = False
+        success = False
+        clock = pygame.time.Clock()
 
-			image_tensor = base_transform(img_array)
-			image_tensor = normalize_transform(image_tensor).unsqueeze(0).to(device)
-			state_tensor = torch.tensor(agent_pos, dtype=torch.float32, device=device).unsqueeze(0)
-			state_tensor_norm = (state_tensor - state_mean) / state_std
+        # --------------- temporal ensembling state ---------------
+        # all_time_actions[t_query, t_exec] stores the action predicted
+        # at query step t_query for execution at absolute step t_exec.
+        # Shape: [max_steps, max_steps + horizon, action_dim]
+        # Allocated once per episode so indexing stays simple.
+        if temporal_agg:
+            all_time_actions = torch.zeros(
+                (FLAGS.max_steps, FLAGS.max_steps + horizon, action_dim),
+                dtype=torch.float32,
+                device=device,
+            )
+ 
+        # Cache the last predicted chunk when not using temporal ensembling
+        cached_chunk: Optional[np.ndarray] = None
 
-			with torch.no_grad():
-				pred_norm_chunk, _, _ = model(image_tensor, state_tensor_norm, action_chunk=None)
-			pred_chunk = (pred_norm_chunk * action_std.view(1, 1, -1)) + action_mean.view(1, 1, -1)
-			pred_chunk_np = pred_chunk.squeeze(0).detach().cpu().numpy().astype(np.float32)
-			chunk_predictions.append((step, pred_chunk_np))
+        while not (terminated or truncated):
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_q):
+                    print("Evaluation aborted by user.")
+                    env.close()
+                    return
 
-			action = ensemble_current_action(step, chunk_predictions, horizon=horizon, decay=ensemble_decay)
-			action = np.clip(action, 0.0, 512.0)
+            agent_pos = get_agent_pos_from_obs(obs)
+            img_array = get_observation_image(env)
 
-			obs, reward, terminated, truncated, info = env.step(action)
-			step_success = bool(info.get("is_success", terminated)) if isinstance(info, dict) else bool(terminated)
-			success = success or step_success
+            image_tensor = base_transform(img_array)
+            image_tensor = normalize_transform(image_tensor).unsqueeze(0).to(device)
+            state_tensor = torch.tensor(agent_pos, dtype=torch.float32, device=device).unsqueeze(0)
+            state_tensor_norm = (state_tensor - state_mean) / state_std
 
-			step += 1
-			if step >= FLAGS.max_steps:
-				truncated = True
+            # ---- decide whether to query the model this step ----
+            if step % query_frequency == 0:
+                with torch.no_grad():
+                    pred_norm_chunk, _, _ = model(image_tensor, state_tensor_norm, action_chunk=None)
+                # pred_norm_chunk: [1, horizon, action_dim]
+                pred_chunk = (pred_norm_chunk * action_std.view(1, 1, -1)) + action_mean.view(1, 1, -1)
+                # [1, horizon, action_dim]
+ 
+                if temporal_agg:
+                    # Write this chunk into the row for the current step.
+                    # Columns t_exec = step .. step+horizon hold the predictions.
+                    all_time_actions[[step], step : step + horizon] = pred_chunk
+                else:
+                    # Store the raw numpy chunk for replay over the next
+                    # query_frequency steps.
+                    cached_chunk = pred_chunk.squeeze(0).cpu().numpy().astype(np.float32)
 
-			env.render()
-			draw_status_overlay(
-				env,
-				ControlState.MODEL_CONTROL,
-				int(seed),
-				0,
-				step,
-				FLAGS.max_steps,
-				agent_pos,
-				False,
-			)
-			clock.tick(FLAGS.fps)
+            # ---- select the action for this step ----
+            if temporal_agg:
+                # Column `step` across all query rows gives every prediction
+                # ever made for this execution timestep.
+                start = max(0, step - horizon + 1)
+                actions_for_step = all_time_actions[start : step + 1, step]
+ 
+                # Exponential weights: index 0 = oldest query, index K-1 = newest.
+                # We want to weight *newer* predictions more heavily, so assign
+                # weight exp(-k * (K-1-j)) ... equivalently, reverse the array
+                # and weight exp(-k * offset) where offset=0 is the newest.
+                k = ensemble_decay
+                exp_weights = np.exp(-k * np.arange(len(actions_for_step) - 1, -1, -1))
+                exp_weights = exp_weights / exp_weights.sum()
+                exp_weights_t = torch.from_numpy(exp_weights).float().to(device).unsqueeze(1)
+ 
+                action_np = (actions_for_step * exp_weights_t).sum(dim=0).cpu().numpy().astype(np.float32)
+            else:
+                # Execute the cached chunk at the appropriate offset.
+                offset = step % query_frequency
+                action_np = cached_chunk[offset].astype(np.float32)
 
-		if success:
-			success_count += 1
-			print(f"Episode {i + 1}/{FLAGS.num_seeds} (seed={seed}) - SUCCESS ({step} steps)")
-		else:
-			print(f"Episode {i + 1}/{FLAGS.num_seeds} (seed={seed}) - FAILED ({step} steps)")
+            action = np.clip(action_np, 0.0, 512.0)
 
-	print("=" * 60)
-	print(f"ACT Evaluation Complete! Success Rate: {success_count}/{FLAGS.num_seeds} ({(success_count/FLAGS.num_seeds)*100:.1f}%)")
-	print("=" * 60)
-	env.close()
+            obs, reward, terminated, truncated, info = env.step(action)
+            step_success = bool(info.get("is_success", terminated)) if isinstance(info, dict) else bool(terminated)
+            success = success or step_success
+
+            step += 1
+            if step >= FLAGS.max_steps:
+                truncated = True
+
+            env.render()
+            draw_status_overlay(
+                env,
+                ControlState.MODEL_CONTROL,
+                int(seed),
+                0,
+                step,
+                FLAGS.max_steps,
+                agent_pos,
+                False,
+            )
+
+            if FLAGS.save_video:
+                frame = capture_frame(env)
+                if frame is not None:
+                    frames.append(frame)
+
+            clock.tick(FLAGS.fps)
+
+        if success:
+            success_count += 1
+            print(f"Episode {i + 1}/{FLAGS.num_seeds} (seed={seed}) - SUCCESS ({step} steps)")
+        else:
+            print(f"Episode {i + 1}/{FLAGS.num_seeds} (seed={seed}) - FAILED ({step} steps)")
+
+        # pause for 1 second on final state
+        if FLAGS.save_video and frames:
+            for j in range(FLAGS.fps):
+                frames.append(frames[-1])
+
+    print("=" * 60)
+    print(f"ACT Evaluation Complete! Success Rate: {success_count}/{FLAGS.num_seeds} ({(success_count/FLAGS.num_seeds)*100:.1f}%)")
+    print("=" * 60)
+
+    if FLAGS.save_video and frames:
+        os.makedirs(FLAGS.video_dir, exist_ok=True)  # auto-create dir
+        video_path = os.path.join(FLAGS.video_dir, time.strftime("%Y-%m-%d-%H-%M-%S.mp4"))
+        imageio.mimwrite(video_path, frames, fps=FLAGS.fps)
+        print(f"Saved video to {video_path}")
+
+    env.close()
 
 
 if __name__ == "__main__":
-	app.run(main)
+    app.run(main)

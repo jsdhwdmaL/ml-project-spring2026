@@ -53,7 +53,6 @@ class ACTPolicy(nn.Module):
             dropout=0.1,
             batch_first=True,
             activation="gelu",
-            norm_first=True,
         )
         self.cvae_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
         self.posterior_mu     = nn.Linear(hidden_dim, latent_dim)
@@ -71,7 +70,6 @@ class ACTPolicy(nn.Module):
             dropout=0.1,
             batch_first=True,
             activation="gelu",
-            norm_first=True,
         )
         self.context_encoder = nn.TransformerEncoder(dec_enc_layer, num_layers=num_encoder_layers)
 
@@ -83,7 +81,6 @@ class ACTPolicy(nn.Module):
             dropout=0.1,
             batch_first=True,
             activation="gelu",
-            norm_first=True,
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
 
