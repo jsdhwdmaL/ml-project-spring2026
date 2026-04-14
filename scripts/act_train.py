@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from dataclasses import asdict, dataclass
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -41,9 +42,13 @@ class TrainConfig:
     nhead: int = 8
     num_encoder_layers: int = 4
     num_decoder_layers: int = 7
-    kl_beta: float = 10 # WIP: adjust to 50 if necessary...
+    kl_beta: float = 0.5
+    kl_warmup_epochs: int = 100
+    kl_free_nats: float = 0.1
     image_shift_px: int = 4
     ensemble_decay: float = 0.05
+    amp: bool = True
+    compile_model: bool = True
     use_vision: bool = True
     """If False, train on pymunk-style ground-truth state only (no ResNet on pixels)."""
     gt_state_zarr: str | None = None
@@ -251,10 +256,19 @@ def train(config: TrainConfig) -> None:
         use_vision=config.use_vision,
     ).to(device)
 
+    if config.compile_model and hasattr(torch, "compile"):
+        try:
+            model = torch.compile(model)
+            print("Enabled torch.compile()")
+        except Exception as exc:
+            print(f"torch.compile() unavailable; continuing without it: {exc}")
+
     num_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"training ACT with {num_parameters} trainable parameters")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    use_amp = bool(config.amp and device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     state_mean_t = torch.tensor(state_mean, dtype=torch.float32, device=device)
     state_std_t = torch.tensor(state_std, dtype=torch.float32, device=device)
@@ -265,6 +279,7 @@ def train(config: TrainConfig) -> None:
 
     for epoch in range(1, config.epochs + 1):
         epoch_index = epoch - 1
+        kl_beta_t = config.kl_beta * min(1.0, epoch / max(1, config.kl_warmup_epochs))
         model.train()
         train_loss_sum = 0.0
         train_recon_sum = 0.0
@@ -288,15 +303,28 @@ def train(config: TrainConfig) -> None:
             states_norm = (states_b - state_mean_t) / state_std_t
             target_actions = (action_chunk - action_mean_t.view(1, 1, -1)) / action_std_t.view(1, 1, -1)
 
-            pred_actions, mu, logvar = model(images, states_norm, target_actions)
-            recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
-            kl_loss = ACTPolicy.kl_divergence(mu, logvar)
-            loss = recon_loss + config.kl_beta * kl_loss
+            amp_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
+            with amp_ctx:
+                pred_actions, mu, logvar = model(images, states_norm, target_actions)
+                recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
+                kl_loss = ACTPolicy.kl_divergence(mu, logvar)
+                if config.kl_free_nats > 0:
+                    kl_objective = torch.clamp(kl_loss, min=float(config.kl_free_nats))
+                else:
+                    kl_objective = kl_loss
+                loss = recon_loss + kl_beta_t * kl_objective
 
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
             train_loss_sum += float(loss.item())
             train_recon_sum += float(recon_loss.item())
@@ -330,10 +358,16 @@ def train(config: TrainConfig) -> None:
                 states_norm = (states_b - state_mean_t) / state_std_t
                 target_actions = (action_chunk - action_mean_t.view(1, 1, -1)) / action_std_t.view(1, 1, -1)
 
-                pred_actions, mu, logvar = model(images, states_norm, target_actions)
-                recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
-                kl_loss = ACTPolicy.kl_divergence(mu, logvar)
-                loss = recon_loss + config.kl_beta * kl_loss
+                amp_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
+                with amp_ctx:
+                    pred_actions, mu, logvar = model(images, states_norm, target_actions)
+                    recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
+                    kl_loss = ACTPolicy.kl_divergence(mu, logvar)
+                    if config.kl_free_nats > 0:
+                        kl_objective = torch.clamp(kl_loss, min=float(config.kl_free_nats))
+                    else:
+                        kl_objective = kl_loss
+                    loss = recon_loss + kl_beta_t * kl_objective
 
                 val_loss_sum += float(loss.item())
                 val_recon_sum += float(recon_loss.item())
@@ -369,6 +403,7 @@ def train(config: TrainConfig) -> None:
 
         print(
             f"Epoch {epoch:03d}/{config.epochs} | "
+            f"beta={kl_beta_t:.4f} | "
             f"train={train_loss:.6f} (recon={train_recon:.6f}, kl={train_kl:.6f}) | "
             f"val={val_loss:.6f} (recon={val_recon:.6f}, kl={val_kl:.6f})"
         )
@@ -407,8 +442,12 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--num_encoder_layers", type=int, default=defaults.num_encoder_layers)
     parser.add_argument("--num_decoder_layers", type=int, default=defaults.num_decoder_layers)
     parser.add_argument("--kl_beta", type=float, default=defaults.kl_beta)
+    parser.add_argument("--kl_warmup_epochs", type=int, default=defaults.kl_warmup_epochs)
+    parser.add_argument("--kl_free_nats", type=float, default=defaults.kl_free_nats)
     parser.add_argument("--image_shift_px", type=int, default=defaults.image_shift_px)
     parser.add_argument("--ensemble_decay", type=float, default=defaults.ensemble_decay)
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=defaults.amp)
+    parser.add_argument("--compile_model", action=argparse.BooleanOptionalAction, default=defaults.compile_model)
     parser.add_argument(
         "--no_vision",
         action="store_true",

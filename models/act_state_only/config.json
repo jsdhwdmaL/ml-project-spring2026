@@ -1,0 +1,22 @@
+{
+  "dataset_id": "lerobot/pusht",
+  "split": "train",
+  "output_dir": "models/act_state_only",
+  "seed": 42,
+  "val_ratio": 0.1,
+  "epochs": 50,
+  "batch_size": 64,
+  "learning_rate": 0.0001,
+  "weight_decay": 1e-05,
+  "horizon": 20,
+  "hidden_dim": 256,
+  "latent_dim": 32,
+  "nhead": 8,
+  "num_encoder_layers": 4,
+  "num_decoder_layers": 7,
+  "kl_beta": 10,
+  "image_shift_px": 4,
+  "ensemble_decay": 0.05,
+  "use_vision": false,
+  "gt_state_zarr": null
+}

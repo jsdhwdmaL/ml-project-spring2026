@@ -36,6 +36,11 @@ flags.DEFINE_boolean("save_video", True, "Save episodes as an MP4 video")
 flags.DEFINE_string("video_dir", "videos/act", "Directory to save episode videos")
 flags.DEFINE_boolean("temporal_agg", True, "Enable temporal ensembling (query model every step, blend predictions)")
 flags.DEFINE_integer("query_frequency", 1, "When temporal_agg is disabled, how many steps to execute from each predicted chunk before re-querying")
+flags.DEFINE_boolean(
+    "on_cuda",
+    False,
+    "If true, require CUDA and run headless as fast as possible (no realtime clock throttling).",
+)
 
 
 def get_agent_pos_from_obs(obs) -> np.ndarray:
@@ -74,7 +79,11 @@ def save_episode_video(frames: List[np.ndarray], path: str, fps: int) -> None:
     print(f"Saved video to {path}")
 
 def main(_):
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    if FLAGS.on_cuda and not torch.cuda.is_available():
+        raise ValueError("--on_cuda=true was requested but CUDA is not available.")
+    device = torch.device(
+        "cuda" if FLAGS.on_cuda else ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    )
     print(f"Loading ACT model from {FLAGS.model_path} onto {device}...")
 
     checkpoint = torch.load(FLAGS.model_path, map_location=device, weights_only=False)
@@ -128,17 +137,22 @@ def main(_):
 
     window_size = int(512 * FLAGS.window_scale)
     obs_type = "environment_state_agent_pos" if use_vision else "state"
+    fast_mode = bool(FLAGS.on_cuda)
+    render_mode = "rgb_array" if fast_mode else "human"
     env = gym.make(
         "gym_pusht/PushT-v0",
         obs_type=obs_type,
-        render_mode="human",
+        render_mode=render_mode,
         visualization_width=window_size,
         visualization_height=window_size,
     )
     env = gym.wrappers.TimeLimit(env, max_episode_steps=FLAGS.max_steps)
 
     print("\nStarting ACT Evaluation...")
-    print(f"H={horizon} | ensemble_decay={ensemble_decay} | use_vision={use_vision} | state_dim={state_dim}")
+    print(
+        f"H={horizon} | ensemble_decay={ensemble_decay} | use_vision={use_vision} | "
+        f"state_dim={state_dim} | fast_mode={fast_mode}"
+    )
     success_count = 0
 
     seeds = np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist() if FLAGS.random_seeds else range(FLAGS.num_seeds)
@@ -150,7 +164,8 @@ def main(_):
         terminated = False
         truncated = False
         success = False
-        clock = pygame.time.Clock()
+        clock = pygame.time.Clock() if not fast_mode else None
+        latest_render = env.render() if fast_mode else None
 
         # --------------- temporal ensembling state ---------------
         # all_time_actions[t_query, t_exec] stores the action predicted
@@ -168,11 +183,12 @@ def main(_):
         cached_chunk: Optional[np.ndarray] = None
 
         while not (terminated or truncated):
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_q):
-                    print("Evaluation aborted by user.")
-                    env.close()
-                    return
+            if not fast_mode:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_q):
+                        print("Evaluation aborted by user.")
+                        env.close()
+                        return
 
             agent_pos = get_agent_pos_from_obs(obs)
             state_vec = policy_state_vector(obs, state_dim)
@@ -180,7 +196,10 @@ def main(_):
             state_tensor_norm = (state_tensor - state_mean) / state_std
 
             if use_vision:
-                img_array = get_observation_image(env)
+                if fast_mode:
+                    img_array = latest_render if latest_render is not None else env.render()
+                else:
+                    img_array = get_observation_image(env)
                 image_tensor = base_transform(img_array)
                 image_tensor = normalize_transform(image_tensor).unsqueeze(0).to(device)
             else:
@@ -235,24 +254,30 @@ def main(_):
             if step >= FLAGS.max_steps:
                 truncated = True
 
-            env.render()
-            draw_status_overlay(
-                env,
-                ControlState.MODEL_CONTROL,
-                int(seed),
-                0,
-                step,
-                FLAGS.max_steps,
-                agent_pos,
-                False,
-            )
+            if fast_mode:
+                latest_render = env.render()
+                if FLAGS.save_video and latest_render is not None:
+                    frames.append(np.asarray(latest_render))
+            else:
+                env.render()
+                draw_status_overlay(
+                    env,
+                    ControlState.MODEL_CONTROL,
+                    int(seed),
+                    0,
+                    step,
+                    FLAGS.max_steps,
+                    agent_pos,
+                    False,
+                    reward=float(reward),
+                )
 
-            if FLAGS.save_video:
-                frame = capture_frame(env)
-                if frame is not None:
-                    frames.append(frame)
+                if FLAGS.save_video:
+                    frame = capture_frame(env)
+                    if frame is not None:
+                        frames.append(frame)
 
-            clock.tick(FLAGS.fps)
+                clock.tick(FLAGS.fps)
 
         if success:
             success_count += 1

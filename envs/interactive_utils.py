@@ -54,7 +54,17 @@ def get_observation_image(env):
         return np.transpose(image_array, (1, 0, 2))
     return np.zeros((512, 512, 3), dtype=np.uint8)
 
-def draw_status_overlay(env, state, env_seed, trial_idx, step, max_steps, agent_pos, is_pure_teleop):
+def draw_status_overlay(
+    env,
+    state,
+    env_seed,
+    trial_idx,
+    step,
+    max_steps,
+    agent_pos,
+    is_pure_teleop,
+    reward=None,
+):
     """Draws tracking text overlay over the Push-T environment."""
     screen = pygame.display.get_surface()
     if screen is None:
@@ -63,7 +73,9 @@ def draw_status_overlay(env, state, env_seed, trial_idx, step, max_steps, agent_
     # Use a default font that is likely to exist on Mac/Linux
     pygame.font.init()
     font = pygame.font.SysFont("Arial", 20, bold=True)
-    
+
+    _, height = screen.get_size()
+
     # Text color: Red if human is interfering, Blue if model is running, Black if paused
     color = (0, 0, 0)
     if state == ControlState.HUMAN_CONTROL:
@@ -73,10 +85,20 @@ def draw_status_overlay(env, state, env_seed, trial_idx, step, max_steps, agent_
 
     text = f"Seed: {env_seed} | Step: {step}/{max_steps} | {state.value}"
     text_surface = font.render(text, True, color)
-    
+
     # Draw a semi-transparent box or simple white background for text
     bg_rect = text_surface.get_rect(topleft=(15, 15))
     pygame.draw.rect(screen, (255, 255, 255), bg_rect.inflate(10, 10))
     screen.blit(text_surface, (15, 15))
+
+    if reward is not None:
+        r = float(reward)
+        reward_text = f"{r:.4f}"
+        reward_surface = font.render(reward_text, True, (0, 0, 0))
+        reward_rect = reward_surface.get_rect()
+        reward_rect.bottomleft = (15, height - 15)
+        reward_bg = reward_rect.inflate(10, 10)
+        pygame.draw.rect(screen, (255, 255, 255), reward_bg)
+        screen.blit(reward_surface, reward_rect)
 
     pygame.display.flip()
