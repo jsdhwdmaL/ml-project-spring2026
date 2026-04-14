@@ -78,6 +78,18 @@ def save_episode_video(frames: List[np.ndarray], path: str, fps: int) -> None:
         return
     print(f"Saved video to {path}")
 
+
+def normalize_state_dict_keys_for_eval(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Support checkpoints saved from torch.compile-wrapped modules.
+
+    Compiled models often save parameter keys prefixed with `_orig_mod.` while the
+    plain ACTPolicy in eval expects unprefixed keys.
+    """
+    prefix = "_orig_mod."
+    if state_dict and all(k.startswith(prefix) for k in state_dict.keys()):
+        return {k[len(prefix):]: v for k, v in state_dict.items()}
+    return state_dict
+
 def main(_):
     if FLAGS.on_cuda and not torch.cuda.is_available():
         raise ValueError("--on_cuda=true was requested but CUDA is not available.")
@@ -119,7 +131,8 @@ def main(_):
         num_decoder_layers=num_decoder_layers,
         use_vision=use_vision,
     ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model_state = normalize_state_dict_keys_for_eval(checkpoint["model_state_dict"])
+    model.load_state_dict(model_state)
     model.eval()
 
     state_mean = torch.tensor(state_mean_np, dtype=torch.float32, device=device)

@@ -171,6 +171,13 @@ def split_episode_indices(episode_index: np.ndarray, val_ratio: float, seed: int
     return train_idx, val_idx
 
 
+def get_model_state_dict_for_saving(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """Return a checkpoint-friendly state_dict regardless of torch.compile wrapping."""
+    if hasattr(model, "_orig_mod"):
+        return model._orig_mod.state_dict()
+    return model.state_dict()
+
+
 def train(config: TrainConfig) -> None:
     os.makedirs(config.output_dir, exist_ok=True)
     np.random.seed(config.seed)
@@ -378,8 +385,9 @@ def train(config: TrainConfig) -> None:
         val_recon = val_recon_sum / max(1, val_batches)
         val_kl = val_kl_sum / max(1, val_batches)
 
+        model_state_dict = get_model_state_dict_for_saving(model)
         checkpoint = {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": model_state_dict,
             "state_mean": state_mean.astype(np.float32),
             "state_std": state_std.astype(np.float32),
             "action_mean": action_mean.astype(np.float32),
