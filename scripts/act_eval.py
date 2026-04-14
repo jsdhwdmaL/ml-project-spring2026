@@ -38,11 +38,26 @@ flags.DEFINE_boolean("temporal_agg", True, "Enable temporal ensembling (query mo
 flags.DEFINE_integer("query_frequency", 1, "When temporal_agg is disabled, how many steps to execute from each predicted chunk before re-querying")
 
 
-def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
+def get_agent_pos_from_obs(obs) -> np.ndarray:
+    """Works for dict observations (pixels + agent_pos) or flat state vectors (first two dims = agent)."""
+    if isinstance(obs, np.ndarray):
+        return np.asarray(obs[:2], dtype=np.float32).reshape(2)
     agent_pos = np.asarray(obs["agent_pos"], dtype=np.float32)
     if agent_pos.ndim == 1:
         return agent_pos
     return agent_pos[-1]
+
+
+def policy_state_vector(obs, state_dim: int) -> np.ndarray:
+    """Build the normalized-state vector expected by ACT (2D agent or 5D pymunk state)."""
+    if isinstance(obs, np.ndarray):
+        v = np.asarray(obs, dtype=np.float32).reshape(-1)
+        if v.shape[0] != state_dim:
+            raise ValueError(f"obs_type=state length {v.shape[0]} != checkpoint state_dim {state_dim}")
+        return v
+    if state_dim == 2:
+        return get_agent_pos_from_obs(obs)
+    raise ValueError("5D state eval requires obs_type='state' (flat numpy observation).")
 
 
 def capture_frame(env) -> Optional[np.ndarray]:
@@ -73,6 +88,7 @@ def main(_):
     num_decoder_layers = int(config.get("num_decoder_layers", 4))
     ckpt_decay = float(config.get("ensemble_decay", 0.01))
     ensemble_decay = ckpt_decay if FLAGS.ensemble_decay < 0 else FLAGS.ensemble_decay
+    use_vision = bool(config.get("use_vision", True))
 
     # When temporal ensembling is on we must query the model every step.
     # When it is off we query every query_frequency steps and execute that
@@ -80,8 +96,11 @@ def main(_):
     temporal_agg: bool = FLAGS.temporal_agg
     query_frequency: int = 1 if temporal_agg else max(1, FLAGS.query_frequency)
 
+    state_mean_np = np.asarray(checkpoint["state_mean"], dtype=np.float32)
+    state_dim = int(state_mean_np.shape[0])
+
     model = ACTPolicy(
-        state_dim=2,
+        state_dim=state_dim,
         action_dim=2,
         horizon=horizon,
         hidden_dim=hidden_dim,
@@ -89,11 +108,12 @@ def main(_):
         nhead=nhead,
         num_encoder_layers=num_encoder_layers,
         num_decoder_layers=num_decoder_layers,
+        use_vision=use_vision,
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    state_mean = torch.tensor(checkpoint["state_mean"], dtype=torch.float32, device=device)
+    state_mean = torch.tensor(state_mean_np, dtype=torch.float32, device=device)
     state_std = torch.tensor(checkpoint["state_std"], dtype=torch.float32, device=device)
     action_mean = torch.tensor(checkpoint["action_mean"], dtype=torch.float32, device=device)
     action_std = torch.tensor(checkpoint["action_std"], dtype=torch.float32, device=device)
@@ -107,9 +127,10 @@ def main(_):
     normalize_transform = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
     window_size = int(512 * FLAGS.window_scale)
+    obs_type = "environment_state_agent_pos" if use_vision else "state"
     env = gym.make(
         "gym_pusht/PushT-v0",
-        obs_type="environment_state_agent_pos",
+        obs_type=obs_type,
         render_mode="human",
         visualization_width=window_size,
         visualization_height=window_size,
@@ -117,7 +138,7 @@ def main(_):
     env = gym.wrappers.TimeLimit(env, max_episode_steps=FLAGS.max_steps)
 
     print("\nStarting ACT Evaluation...")
-    print(f"H={horizon} | ensemble_decay={ensemble_decay}")
+    print(f"H={horizon} | ensemble_decay={ensemble_decay} | use_vision={use_vision} | state_dim={state_dim}")
     success_count = 0
 
     seeds = np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist() if FLAGS.random_seeds else range(FLAGS.num_seeds)
@@ -154,12 +175,16 @@ def main(_):
                     return
 
             agent_pos = get_agent_pos_from_obs(obs)
-            img_array = get_observation_image(env)
-
-            image_tensor = base_transform(img_array)
-            image_tensor = normalize_transform(image_tensor).unsqueeze(0).to(device)
-            state_tensor = torch.tensor(agent_pos, dtype=torch.float32, device=device).unsqueeze(0)
+            state_vec = policy_state_vector(obs, state_dim)
+            state_tensor = torch.tensor(state_vec, dtype=torch.float32, device=device).unsqueeze(0)
             state_tensor_norm = (state_tensor - state_mean) / state_std
+
+            if use_vision:
+                img_array = get_observation_image(env)
+                image_tensor = base_transform(img_array)
+                image_tensor = normalize_transform(image_tensor).unsqueeze(0).to(device)
+            else:
+                image_tensor = None
 
             # ---- decide whether to query the model this step ----
             if step % query_frequency == 0:

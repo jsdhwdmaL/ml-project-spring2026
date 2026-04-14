@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -43,6 +44,10 @@ class TrainConfig:
     kl_beta: float = 10 # WIP: adjust to 50 if necessary...
     image_shift_px: int = 4
     ensemble_decay: float = 0.05
+    use_vision: bool = True
+    """If False, train on pymunk-style ground-truth state only (no ResNet on pixels)."""
+    gt_state_zarr: str | None = None
+    """Optional path to a replay .zarr with data/state (N, 5) aligned with lerobot frame order."""
 
 
 class ACTStepDataset(Dataset):
@@ -67,6 +72,33 @@ class ACTStepDataset(Dataset):
         return {
             "image": sample["observation.image"].float(),
             "state": sample["observation.state"].float(),
+            "action_chunk": torch.from_numpy(self.action_chunks[global_idx]).float(),
+            "action_is_pad": torch.from_numpy(self.action_is_pad[global_idx]).bool(),
+        }
+
+
+class ACTStepDatasetStateOnly(Dataset):
+    """Same as ACTStepDataset but uses a precomputed state array (no image loading)."""
+
+    def __init__(
+        self,
+        step_indices: np.ndarray,
+        states: np.ndarray,
+        action_chunks: np.ndarray,
+        action_is_pad: np.ndarray,
+    ):
+        self.step_indices = step_indices.astype(np.int64)
+        self.states = states.astype(np.float32)
+        self.action_chunks = action_chunks
+        self.action_is_pad = action_is_pad
+
+    def __len__(self) -> int:
+        return int(self.step_indices.shape[0])
+
+    def __getitem__(self, idx: int):
+        global_idx = int(self.step_indices[idx])
+        return {
+            "state": torch.from_numpy(self.states[global_idx]).float(),
             "action_chunk": torch.from_numpy(self.action_chunks[global_idx]).float(),
             "action_is_pad": torch.from_numpy(self.action_is_pad[global_idx]).bool(),
         }
@@ -151,7 +183,39 @@ def train(config: TrainConfig) -> None:
 
     episode_index = np.array(dataset.hf_dataset["episode_index"]).flatten()
     actions = np.array(dataset.hf_dataset["action"], dtype=np.float32)
-    states = np.array(dataset.hf_dataset["observation.state"], dtype=np.float32)
+    n_frames = int(episode_index.shape[0])
+
+    gt_path = config.gt_state_zarr
+    if not config.use_vision and gt_path is None:
+        candidate = Path(REPO_ROOT) / "state-only" / "pusht 2" / "pusht_cchi_v7_replay.zarr"
+        if candidate.is_dir():
+            gt_path = str(candidate)
+            print(f"Using default pymunk state zarr: {gt_path}")
+
+    if not config.use_vision:
+        if gt_path is None:
+            states = np.array(dataset.hf_dataset["observation.state"], dtype=np.float32)
+            if states.shape[1] != 5:
+                raise ValueError(
+                    "State-only training needs 5D pymunk state [agent_x, agent_y, block_x, block_y, angle]. "
+                    "Pass --gt_state_zarr pointing to a replay .zarr with data/state (N, 5), or use a dataset "
+                    "whose observation.state has shape (5,)."
+                )
+        else:
+            import zarr
+
+            zroot = zarr.open(gt_path, mode="r")
+            states = np.asarray(zroot["data"]["state"], dtype=np.float32)
+            if states.shape[0] != n_frames:
+                raise ValueError(
+                    f"Zarr state rows {states.shape[0]} != dataset frames {n_frames}; alignment mismatch."
+                )
+            if states.shape[1] != 5:
+                raise ValueError(f"Expected zarr data/state shape (N, 5), got {states.shape}")
+    else:
+        states = np.array(dataset.hf_dataset["observation.state"], dtype=np.float32)
+
+    state_dim = int(states.shape[1])
 
     action_chunks, action_is_pad = build_action_chunks_by_episode(actions, episode_index, config.horizon)
     train_idx, val_idx = split_episode_indices(episode_index, config.val_ratio, config.seed)
@@ -161,14 +225,22 @@ def train(config: TrainConfig) -> None:
     action_mean = actions[train_idx].mean(axis=0).astype(np.float32)
     action_std = (actions[train_idx].std(axis=0) + 1e-6).astype(np.float32)
 
-    train_dataset = ACTStepDataset(dataset, train_idx, action_chunks, action_is_pad)
-    val_dataset = ACTStepDataset(dataset, val_idx, action_chunks, action_is_pad)
+    if config.use_vision:
+        train_dataset = ACTStepDataset(dataset, train_idx, action_chunks, action_is_pad)
+        val_dataset = ACTStepDataset(dataset, val_idx, action_chunks, action_is_pad)
+    else:
+        train_dataset = ACTStepDatasetStateOnly(train_idx, states, action_chunks, action_is_pad)
+        val_dataset = ACTStepDatasetStateOnly(val_idx, states, action_chunks, action_is_pad)
 
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    # persistent_workers=True keeps workers alive across epochs so val doesn't pay a big
+    # "first batch" delay every time (otherwise new worker processes + first collation block
+    # before the Val tqdm moves).
+    _dl_kw = dict(num_workers=4, pin_memory=True, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, **_dl_kw)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, **_dl_kw)
 
     model = ACTPolicy(
-        state_dim=2,
+        state_dim=state_dim,
         action_dim=2,
         horizon=config.horizon,
         hidden_dim=config.hidden_dim,
@@ -176,6 +248,7 @@ def train(config: TrainConfig) -> None:
         nhead=config.nhead,
         num_encoder_layers=config.num_encoder_layers,
         num_decoder_layers=config.num_decoder_layers,
+        use_vision=config.use_vision,
     ).to(device)
 
     num_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -199,14 +272,18 @@ def train(config: TrainConfig) -> None:
         train_batches = 0
 
         for batch in tqdm(train_loader, desc=f"Train {epoch}/{config.epochs}", leave=False):
-            images = preprocess_image_batch(
-                batch["image"].to(device),
-                image_normalize,
-                random_shift_px=config.image_shift_px,
-            )
             states_b = batch["state"].to(device)
             action_chunk = batch["action_chunk"].to(device)
             action_is_pad_b = batch["action_is_pad"].to(device)
+
+            if config.use_vision:
+                images = preprocess_image_batch(
+                    batch["image"].to(device),
+                    image_normalize,
+                    random_shift_px=config.image_shift_px,
+                )
+            else:
+                images = None
 
             states_norm = (states_b - state_mean_t) / state_std_t
             target_actions = (action_chunk - action_mean_t.view(1, 1, -1)) / action_std_t.view(1, 1, -1)
@@ -237,14 +314,18 @@ def train(config: TrainConfig) -> None:
         val_batches = 0
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Val {epoch}/{config.epochs}", leave=False):
-                images = preprocess_image_batch(
-                    batch["image"].to(device),
-                    image_normalize,
-                    random_shift_px=0,
-                )
                 states_b = batch["state"].to(device)
                 action_chunk = batch["action_chunk"].to(device)
                 action_is_pad_b = batch["action_is_pad"].to(device)
+
+                if config.use_vision:
+                    images = preprocess_image_batch(
+                        batch["image"].to(device),
+                        image_normalize,
+                        random_shift_px=0,
+                    )
+                else:
+                    images = None
 
                 states_norm = (states_b - state_mean_t) / state_std_t
                 target_actions = (action_chunk - action_mean_t.view(1, 1, -1)) / action_std_t.view(1, 1, -1)
@@ -328,8 +409,21 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--kl_beta", type=float, default=defaults.kl_beta)
     parser.add_argument("--image_shift_px", type=int, default=defaults.image_shift_px)
     parser.add_argument("--ensemble_decay", type=float, default=defaults.ensemble_decay)
+    parser.add_argument(
+        "--no_vision",
+        action="store_true",
+        help="Train on pymunk ground-truth state only (no ResNet). Use --gt_state_zarr or 5D observation.state.",
+    )
+    parser.add_argument(
+        "--gt_state_zarr",
+        type=str,
+        default=None,
+        help="Replay zarr with data/state (N,5) aligned with dataset frames (e.g. state-only/pusht 2/...zarr).",
+    )
     args = parser.parse_args()
-    return TrainConfig(**vars(args))
+    ns = vars(args)
+    ns["use_vision"] = not ns.pop("no_vision")
+    return TrainConfig(**ns)
 
 
 if __name__ == "__main__":

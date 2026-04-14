@@ -25,18 +25,24 @@ class ACTPolicy(nn.Module):
         nhead: int = 8,
         num_encoder_layers: int = 4,
         num_decoder_layers: int = 7,
+        use_vision: bool = True,
     ):
         super().__init__()
         self.horizon = horizon
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
+        self.use_vision = use_vision
 
-        # Vision backbone (ResNet18, no final pooling/fc)
-        vision_backbone = models.resnet18(weights="DEFAULT")
-        self.vision_backbone = nn.Sequential(*list(vision_backbone.children())[:-2])
-        # ResNet18 produces (B, 512, H', W') feature maps
-        self.vision_proj = nn.Linear(512, hidden_dim)
+        # Vision backbone (ResNet18, no final pooling/fc); skipped when use_vision=False (ground-truth state only)
+        if use_vision:
+            vision_backbone = models.resnet18(weights="DEFAULT")
+            self.vision_backbone = nn.Sequential(*list(vision_backbone.children())[:-2])
+            # ResNet18 produces (B, 512, H', W') feature maps
+            self.vision_proj = nn.Linear(512, hidden_dim)
+        else:
+            self.vision_backbone = None
+            self.vision_proj = None
 
         # State / action projections
         self.enc_state_proj = nn.Linear(state_dim, hidden_dim)  # CVAE encoder only
@@ -109,6 +115,8 @@ class ACTPolicy(nn.Module):
 
         Returns a sequence of shape (B, N, hidden_dim) where N = H' * W'.
         """
+        if not self.use_vision or self.vision_backbone is None:
+            raise RuntimeError("_encode_image called with use_vision=False")
         feat = self.vision_backbone(image)          # (B, 512, H', W')
         B, C, H, W = feat.shape
         # flatten spatial dims to (B, H'*W', 512)
@@ -162,11 +170,13 @@ class ACTPolicy(nn.Module):
 
     def forward(
         self,
-        image: torch.Tensor,
+        image: torch.Tensor | None,
         state: torch.Tensor,
         action_chunk: torch.Tensor | None = None,
     ):
-        B = image.size(0)
+        B = state.size(0)
+        dev = state.device
+        dtype = state.dtype
 
         # 1. CVAE Encoder (training) / zero latent (test)
         mu = logvar = None
@@ -174,21 +184,20 @@ class ACTPolicy(nn.Module):
             mu, logvar = self._encode_posterior(state, action_chunk)
             latent = self._reparameterize(mu, logvar)
         else:
-            latent = torch.zeros(B, self.latent_dim, dtype=image.dtype, device=image.device)
+            latent = torch.zeros(B, self.latent_dim, dtype=dtype, device=dev)
 
         # 2. Build context for CVAE Decoder
+        state_tok = self.dec_state_proj(state).unsqueeze(1)  # (B, 1, D)
+        z_tok = self.latent_proj(latent).unsqueeze(1)  # (B, 1, D)
 
-        # Vision tokens with 2-D positional embedding: (B, N, D)
-        vision_tokens = self._encode_image(image)
-
-        # State token: (B, 1, D)
-        state_tok = self.dec_state_proj(state).unsqueeze(1)
-
-        # Latent (z) token: (B, 1, D)
-        z_tok = self.latent_proj(latent).unsqueeze(1)
-
-        # Concatenate all context tokens (vision already has pos emb from _encode_image)
-        context = torch.cat([vision_tokens, state_tok, z_tok], dim=1)  # (B, N+2, D)
+        if self.use_vision:
+            if image is None:
+                raise ValueError("image is required when use_vision=True")
+            vision_tokens = self._encode_image(image)
+            context = torch.cat([vision_tokens, state_tok, z_tok], dim=1)  # (B, N+2, D)
+        else:
+            # Pymunk / simulator ground-truth state only (no CNN on pixels)
+            context = torch.cat([state_tok, z_tok], dim=1)  # (B, 2, D)
 
         # Fuse all context tokens with a TransformerEncoder
         memory = self.context_encoder(context)  # (B, N+2, D)
