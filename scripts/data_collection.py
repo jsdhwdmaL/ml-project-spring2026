@@ -168,8 +168,8 @@ def main(_):
         seed_list = [int(s.strip()) for s in FLAGS.seeds.split(",") if s.strip()]
         seeds_str = f"{len(seed_list)} specific seeds"
     else:
-        seed_list = list(range(FLAGS.start_seed, FLAGS.start_seed + FLAGS.num_seeds))
-        seeds_str = f"{FLAGS.start_seed} to {FLAGS.start_seed + FLAGS.num_seeds - 1}"
+        seed_list = np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist()
+        seeds_str = f"{len(seed_list)} random seeds"
 
     print("=" * 60)
     print("Pure Teleoperation Data Collection")

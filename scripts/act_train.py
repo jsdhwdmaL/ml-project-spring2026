@@ -100,9 +100,9 @@ def preprocess_image_batch(images: torch.Tensor, image_normalize, random_shift_p
 
     if images.numel() > 0 and torch.max(images) > 1.0:
         images = images / 255.0
-    if images.shape[-2:] != (96, 96):
-        images = F.interpolate(images, size=(96, 96), mode="bilinear", align_corners=False)
-    images = random_shift_batch(images, max_shift=random_shift_px)
+    if images.shape[-2:] != (512, 512):
+        images = F.interpolate(images, size=(512, 512), mode="bilinear", align_corners=False)
+    #images = random_shift_batch(images, max_shift=random_shift_px)
     images = image_normalize(images)
     return images
 
@@ -179,7 +179,7 @@ def train(config: TrainConfig) -> None:
     ).to(device)
 
     num_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"training ACT with {num_parameters} trainable parameters")
+    print(f"Training ACT with {num_parameters} trainable parameters")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
 

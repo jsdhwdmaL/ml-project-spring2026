@@ -21,7 +21,7 @@ class ACTPolicy(nn.Module):
         action_dim: int = 2,
         horizon: int = 20,
         hidden_dim: int = 256,
-        latent_dim: int = 32,
+        latent_dim: int = 32, # note: online implementation uses 512 and 128 for these
         nhead: int = 8,
         num_encoder_layers: int = 4,
         num_decoder_layers: int = 7,
@@ -49,7 +49,7 @@ class ACTPolicy(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=nhead,
-            dim_feedforward=hidden_dim * 4,
+            dim_feedforward=hidden_dim * 4, # TODO: make ff dim a hyperparameter
             dropout=0.1,
             batch_first=True,
             activation="gelu",

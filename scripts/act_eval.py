@@ -102,7 +102,7 @@ def main(_):
 
     base_transform = T.Compose([
         T.ToTensor(),
-        T.Resize((96, 96), antialias=True),
+        T.Resize((512, 512), antialias=True),
     ])
     normalize_transform = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
