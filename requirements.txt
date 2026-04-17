@@ -15,4 +15,4 @@ pymunk<7
 torch
 torchvision
 tqdm
-zarr
+wandb
