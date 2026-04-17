@@ -8,6 +8,7 @@ instead declares the PushT policy schema explicitly.
 import argparse
 import dataclasses
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,11 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.policies.factory import make_pre_post_processors
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 
 def normalize_dataset_id(dataset_id: str) -> str:
@@ -244,6 +250,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--norm_visual", type=str, default="MEAN_STD")
     parser.add_argument("--norm_state", type=str, default="MEAN_STD")
     parser.add_argument("--norm_action", type=str, default="MEAN_STD")
+    parser.add_argument("--wandb", action="store_true", default=False)
+    parser.add_argument("--wandb_project", type=str, default=None)
+    parser.add_argument("--wandb_entity", type=str, default=None)
 
     return parser.parse_args()
 
@@ -275,6 +284,21 @@ def main() -> None:
 
     output_directory = Path(args.output_dir)
     output_directory.mkdir(parents=True, exist_ok=True)
+
+    wandb_run = None
+    if args.wandb:
+        if wandb is None:
+            raise ImportError("wandb is not installed. Install dependencies from requirements.txt or disable --wandb.")
+        if not args.wandb_project or not args.wandb_entity:
+            raise ValueError("--wandb requires both --wandb_project and --wandb_entity")
+        run_name = f"{output_directory.name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=run_name,
+            config=vars(args).copy(),
+            tags=["lerobot_act", "train"],
+        )
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -340,6 +364,13 @@ def main() -> None:
 
                 if step % args.log_freq == 0:
                     print(f"step: {step} loss: {loss.item():.4f}")
+                    if wandb_run is not None:
+                        wandb.log(
+                            {
+                                "train/loss": float(loss.item()),
+                            },
+                            step=step,
+                        )
 
                 step += 1
 
@@ -371,6 +402,10 @@ def main() -> None:
         )
         rotate_step_checkpoints(output_directory, args.max_checkpoints_to_keep)
         print(f"saved checkpoint: {emergency_path.name}")
+    finally:
+        if wandb_run is not None:
+            wandb_run.summary["final_step"] = int(step)
+            wandb_run.summary["interrupted"] = bool(interrupted)
 
     policy.save_pretrained(output_directory)
     preprocessor.save_pretrained(output_directory)
@@ -382,6 +417,9 @@ def main() -> None:
     print(f"Saved local ACT artifacts to: {output_directory}")
     if interrupted:
         print("Run ended early due to interruption.")
+
+    if wandb_run is not None:
+        wandb.finish()
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ from models.bc_mlp import BehavioralCloningPolicy
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/bc_mlp_dagger/best.pt", "Path to trained model weights")
+flags.DEFINE_string("model_path", "models/bc_mlp/best.pt", "Path to trained model weights")
 flags.DEFINE_integer("num_seeds", 5, "Number of episodes to evaluate")
 flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using 0..num_seeds-1")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz (Must match training data!)")

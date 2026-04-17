@@ -5,6 +5,8 @@ import json
 import os
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -20,6 +22,11 @@ if REPO_ROOT not in sys.path:
 from data.build_chunk import build_action_chunks_by_episode
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from models.chunk_mlp import BehavioralCloningPolicy
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 
 @dataclass
@@ -38,6 +45,9 @@ class TrainConfig:
     frame_gap: int = 9
     horizon: int = 50
     ensemble_decay: float = 0.01
+    wandb: bool = False
+    wandb_project: str | None = None
+    wandb_entity: str | None = None
 
 
 class ChunkMLPStepDataset(Dataset):
@@ -156,6 +166,21 @@ def train(config: TrainConfig) -> None:
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
+    wandb_run = None
+    if config.wandb:
+        if wandb is None:
+            raise ImportError("wandb is not installed. Install dependencies from requirements.txt or disable --wandb.")
+        if not config.wandb_project or not config.wandb_entity:
+            raise ValueError("--wandb requires both --wandb_project and --wandb_entity")
+        run_name = f"{Path(config.output_dir).name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        wandb_run = wandb.init(
+            project=config.wandb_project,
+            entity=config.wandb_entity,
+            name=run_name,
+            config=asdict(config),
+            tags=["chunk_mlp", "train"],
+        )
+
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Training on device: {device}")
 
@@ -177,37 +202,12 @@ def train(config: TrainConfig) -> None:
     transform_fn = get_transforms()
     best_val = float("inf")
 
-    for epoch in range(1, config.epochs + 1):
-        model.train()
-        train_loss_sum = 0.0
-        train_batches = 0
-        for batch in tqdm(train_loader, desc=f"Train {epoch}/{config.epochs}", leave=False):
-            images = preprocess_image_batch(batch["observation.image"].to(device), transform_fn)
-            states = batch["observation.state"].to(device, dtype=torch.float32)
-            action_chunk = batch["action_chunk"].to(device)
-            action_is_pad_b = batch["action_is_pad"].to(device)
-
-            states_norm = ((states - s_mean_t) / s_std_t).view(states.size(0), -1)
-            target_actions = (action_chunk - a_mean_t.view(1, 1, -1)) / a_std_t.view(1, 1, -1)
-
-            pred = model(images, states_norm)
-            loss = masked_smooth_l1_loss(pred, target_actions, action_is_pad_b, beta=1.0)
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-            train_loss_sum += float(loss.item())
-            train_batches += 1
-
-        avg_train = train_loss_sum / max(1, train_batches)
-
-        model.eval()
-        val_loss_sum = 0.0
-        val_batches = 0
-        with torch.no_grad():
-            for batch in tqdm(val_loader, desc=f"Val {epoch}/{config.epochs}", leave=False):
+    try:
+        for epoch in range(1, config.epochs + 1):
+            model.train()
+            train_loss_sum = 0.0
+            train_batches = 0
+            for batch in tqdm(train_loader, desc=f"Train {epoch}/{config.epochs}", leave=False):
                 images = preprocess_image_batch(batch["observation.image"].to(device), transform_fn)
                 states = batch["observation.state"].to(device, dtype=torch.float32)
                 action_chunk = batch["action_chunk"].to(device)
@@ -219,30 +219,73 @@ def train(config: TrainConfig) -> None:
                 pred = model(images, states_norm)
                 loss = masked_smooth_l1_loss(pred, target_actions, action_is_pad_b, beta=1.0)
 
-                val_loss_sum += float(loss.item())
-                val_batches += 1
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
-        avg_val = val_loss_sum / max(1, val_batches)
-        print(f"Epoch {epoch:03d} | Train Recon: {avg_train:.6f} | Val Recon: {avg_val:.6f}")
+                train_loss_sum += float(loss.item())
+                train_batches += 1
 
-        checkpoint = {
-            "model_state_dict": model.state_dict(),
-            "state_mean": state_mean,
-            "state_std": state_std,
-            "action_mean": action_mean,
-            "action_std": action_std,
-            "config": asdict(config),
-            "epoch": epoch,
-            "train_recon": avg_train,
-            "val_recon": avg_val,
-        }
+            avg_train = train_loss_sum / max(1, train_batches)
 
-        torch.save(checkpoint, os.path.join(config.output_dir, "latest.pt"))
+            model.eval()
+            val_loss_sum = 0.0
+            val_batches = 0
+            with torch.no_grad():
+                for batch in tqdm(val_loader, desc=f"Val {epoch}/{config.epochs}", leave=False):
+                    images = preprocess_image_batch(batch["observation.image"].to(device), transform_fn)
+                    states = batch["observation.state"].to(device, dtype=torch.float32)
+                    action_chunk = batch["action_chunk"].to(device)
+                    action_is_pad_b = batch["action_is_pad"].to(device)
 
-        if avg_val < best_val:
-            best_val = avg_val
-            torch.save(checkpoint, os.path.join(config.output_dir, "best.pt"))
-            print(f"  --> New best model saved (Val Recon: {best_val:.6f})")
+                    states_norm = ((states - s_mean_t) / s_std_t).view(states.size(0), -1)
+                    target_actions = (action_chunk - a_mean_t.view(1, 1, -1)) / a_std_t.view(1, 1, -1)
+
+                    pred = model(images, states_norm)
+                    loss = masked_smooth_l1_loss(pred, target_actions, action_is_pad_b, beta=1.0)
+
+                    val_loss_sum += float(loss.item())
+                    val_batches += 1
+
+            avg_val = val_loss_sum / max(1, val_batches)
+            print(f"Epoch {epoch:03d} | Train Recon: {avg_train:.6f} | Val Recon: {avg_val:.6f}")
+            if wandb_run is not None:
+                wandb.log(
+                    {
+                        "epoch": epoch,
+                        "train/loss": float(avg_train),
+                        "val/loss": float(avg_val),
+                    },
+                    step=epoch,
+                )
+
+            checkpoint = {
+                "model_state_dict": model.state_dict(),
+                "state_mean": state_mean,
+                "state_std": state_std,
+                "action_mean": action_mean,
+                "action_std": action_std,
+                "config": asdict(config),
+                "epoch": epoch,
+                "train_recon": avg_train,
+                "val_recon": avg_val,
+            }
+
+            torch.save(checkpoint, os.path.join(config.output_dir, "latest.pt"))
+
+            if avg_val < best_val:
+                best_val = avg_val
+                torch.save(checkpoint, os.path.join(config.output_dir, "best.pt"))
+                print(f"  --> New best model saved (Val Recon: {best_val:.6f})")
+                if wandb_run is not None:
+                    wandb.log({"best/val_loss": float(best_val)}, step=epoch)
+
+        if wandb_run is not None:
+            wandb_run.summary["best_val_loss"] = float(best_val)
+    finally:
+        if wandb_run is not None:
+            wandb.finish()
 
     with open(os.path.join(config.output_dir, "config.json"), "w", encoding="utf-8") as file:
         json.dump(asdict(config), file, indent=2)
@@ -264,6 +307,9 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--frame_gap", type=int, default=9)
     parser.add_argument("--horizon", type=int, default=50)
     parser.add_argument("--ensemble_decay", type=float, default=0.01)
+    parser.add_argument("--wandb", action="store_true", default=False)
+    parser.add_argument("--wandb_project", type=str, default=None)
+    parser.add_argument("--wandb_entity", type=str, default=None)
     args = parser.parse_args()
 
     return TrainConfig(
@@ -281,6 +327,9 @@ def parse_args() -> TrainConfig:
         frame_gap=args.frame_gap,
         horizon=args.horizon,
         ensemble_decay=args.ensemble_decay,
+        wandb=args.wandb,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
     )
 
 

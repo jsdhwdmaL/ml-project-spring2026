@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +24,11 @@ if REPO_ROOT not in sys.path:
 from data.build_chunk import build_action_chunks_by_episode
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from models.act import ACTPolicy
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 
 @dataclass
@@ -56,6 +62,9 @@ class FinetuneConfig:
     nhead: Optional[int] = None
     num_decoder_layers: Optional[int] = None
     ensemble_decay: Optional[float] = None
+    wandb: bool = False
+    wandb_project: str | None = None
+    wandb_entity: str | None = None
 
 
 class ACTNPZStepDataset(Dataset):
@@ -420,6 +429,21 @@ def train(config: FinetuneConfig) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     image_normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
+    wandb_run = None
+    if config.wandb:
+        if wandb is None:
+            raise ImportError("wandb is not installed. Install dependencies from requirements.txt or disable --wandb.")
+        if not config.wandb_project or not config.wandb_entity:
+            raise ValueError("--wandb requires both --wandb_project and --wandb_entity")
+        run_name = f"{Path(config.output_dir).name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        wandb_run = wandb.init(
+            project=config.wandb_project,
+            entity=config.wandb_entity,
+            name=run_name,
+            config=asdict(config),
+            tags=["act", "dagger_finetune"],
+        )
+
     base_checkpoint = torch.load(config.model_path, map_location=device, weights_only=False)
     ckpt_config = base_checkpoint.get("config", {})
     _resolve_arch_from_checkpoint(config, ckpt_config)
@@ -513,53 +537,34 @@ def train(config: FinetuneConfig) -> None:
     action_mean_t = torch.tensor(action_mean, dtype=torch.float32, device=device)
     action_std_t = torch.tensor(action_std, dtype=torch.float32, device=device)
 
+    if wandb_run is not None:
+        wandb.log(
+            {
+                "data/candidate_episodes": int(data_stats["candidate_episodes"]),
+                "data/selected_episodes": int(data_stats["selected_episodes"]),
+                "data/selected_steps": int(data_stats["selected_steps"]),
+                "data/dagger_train_steps": int(len(train_idx)),
+                "data/dagger_val_steps": int(len(val_idx)),
+                "data/original_train_steps": int(len(original_data["train_idx"])) if original_data is not None else 0,
+                "data/original_val_steps": int(len(original_data["val_idx"])) if original_data is not None else 0,
+            },
+            step=0,
+        )
+
     best_val = float("inf")
 
-    for epoch in range(1, config.epochs + 1):
-        epoch_kl_beta = get_kl_beta(epoch - 1, config)
+    try:
+        for epoch in range(1, config.epochs + 1):
+            epoch_kl_beta = get_kl_beta(epoch - 1, config)
 
-        model.train()
-        train_loss_sum = 0.0
-        train_recon_sum = 0.0
-        train_kl_sum = 0.0
-        train_batches = 0
+            model.train()
+            train_loss_sum = 0.0
+            train_recon_sum = 0.0
+            train_kl_sum = 0.0
+            train_batches = 0
 
-        for batch in tqdm(train_loader, desc=f"Train {epoch}/{config.epochs}", leave=False):
-            images_b = preprocess_image_batch(batch["image"].to(device), image_normalize, random_shift_px=config.image_shift_px)
-            states_b = batch["state"].to(device)
-            action_chunk = batch["action_chunk"].to(device)
-            action_is_pad_b = batch["action_is_pad"].to(device)
-
-            states_norm = (states_b - state_mean_t) / state_std_t
-            target_actions = (action_chunk - action_mean_t.view(1, 1, -1)) / action_std_t.view(1, 1, -1)
-
-            pred_actions, mu, logvar = model(images_b, states_norm, target_actions)
-            recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
-            kl_loss = ACTPolicy.kl_divergence(mu, logvar)
-            loss = recon_loss + epoch_kl_beta * kl_loss
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-            train_loss_sum += float(loss.item())
-            train_recon_sum += float(recon_loss.item())
-            train_kl_sum += float(kl_loss.item())
-            train_batches += 1
-
-        train_loss = train_loss_sum / max(1, train_batches)
-        train_recon = train_recon_sum / max(1, train_batches)
-        train_kl = train_kl_sum / max(1, train_batches)
-
-        model.eval()
-        val_loss_sum = 0.0
-        val_recon_sum = 0.0
-        val_kl_sum = 0.0
-        val_batches = 0
-        with torch.no_grad():
-            for batch in tqdm(val_loader, desc=f"Val {epoch}/{config.epochs}", leave=False):
-                images_b = preprocess_image_batch(batch["image"].to(device), image_normalize, random_shift_px=0)
+            for batch in tqdm(train_loader, desc=f"Train {epoch}/{config.epochs}", leave=False):
+                images_b = preprocess_image_batch(batch["image"].to(device), image_normalize, random_shift_px=config.image_shift_px)
                 states_b = batch["state"].to(device)
                 action_chunk = batch["action_chunk"].to(device)
                 action_is_pad_b = batch["action_is_pad"].to(device)
@@ -572,55 +577,111 @@ def train(config: FinetuneConfig) -> None:
                 kl_loss = ACTPolicy.kl_divergence(mu, logvar)
                 loss = recon_loss + epoch_kl_beta * kl_loss
 
-                val_loss_sum += float(loss.item())
-                val_recon_sum += float(recon_loss.item())
-                val_kl_sum += float(kl_loss.item())
-                val_batches += 1
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
-        val_loss = val_loss_sum / max(1, val_batches)
-        val_recon = val_recon_sum / max(1, val_batches)
-        val_kl = val_kl_sum / max(1, val_batches)
+                train_loss_sum += float(loss.item())
+                train_recon_sum += float(recon_loss.item())
+                train_kl_sum += float(kl_loss.item())
+                train_batches += 1
 
-        checkpoint = {
-            "model_state_dict": model.state_dict(),
-            "state_mean": state_mean,
-            "state_std": state_std,
-            "action_mean": action_mean,
-            "action_std": action_std,
-            "config": asdict(config),
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "train_recon": train_recon,
-            "train_kl": train_kl,
-            "val_loss": val_loss,
-            "val_recon": val_recon,
-            "val_kl": val_kl,
-            "source_model_path": config.model_path,
-            "data_stats": data_stats,
-            "mix_stats": {
-                "include_original_data": bool(config.include_original_data),
-                "mix_dagger_ratio": float(config.mix_dagger_ratio),
-                "mix_original_ratio": float(config.mix_original_ratio),
-                "dagger_train_steps": int(len(train_idx)),
-                "dagger_val_steps": int(len(val_idx)),
-                "original_train_steps": int(len(original_data["train_idx"])) if original_data is not None else 0,
-                "original_val_steps": int(len(original_data["val_idx"])) if original_data is not None else 0,
-            },
-        }
+            train_loss = train_loss_sum / max(1, train_batches)
+            train_recon = train_recon_sum / max(1, train_batches)
+            train_kl = train_kl_sum / max(1, train_batches)
 
-        latest_path = os.path.join(config.output_dir, "latest.pt")
-        torch.save(checkpoint, latest_path)
-        if val_loss < best_val:
-            best_val = val_loss
-            best_path = os.path.join(config.output_dir, "best.pt")
-            torch.save(checkpoint, best_path)
+            model.eval()
+            val_loss_sum = 0.0
+            val_recon_sum = 0.0
+            val_kl_sum = 0.0
+            val_batches = 0
+            with torch.no_grad():
+                for batch in tqdm(val_loader, desc=f"Val {epoch}/{config.epochs}", leave=False):
+                    images_b = preprocess_image_batch(batch["image"].to(device), image_normalize, random_shift_px=0)
+                    states_b = batch["state"].to(device)
+                    action_chunk = batch["action_chunk"].to(device)
+                    action_is_pad_b = batch["action_is_pad"].to(device)
 
-        print(
-            f"Epoch {epoch:03d}/{config.epochs} | "
-            f"kl_beta={epoch_kl_beta:.6f} | "
-            f"train={train_loss:.6f} (recon={train_recon:.6f}, kl={train_kl:.6f}) | "
-            f"val={val_loss:.6f} (recon={val_recon:.6f}, kl={val_kl:.6f})"
-        )
+                    states_norm = (states_b - state_mean_t) / state_std_t
+                    target_actions = (action_chunk - action_mean_t.view(1, 1, -1)) / action_std_t.view(1, 1, -1)
+
+                    pred_actions, mu, logvar = model(images_b, states_norm, target_actions)
+                    recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
+                    kl_loss = ACTPolicy.kl_divergence(mu, logvar)
+                    loss = recon_loss + epoch_kl_beta * kl_loss
+
+                    val_loss_sum += float(loss.item())
+                    val_recon_sum += float(recon_loss.item())
+                    val_kl_sum += float(kl_loss.item())
+                    val_batches += 1
+
+            val_loss = val_loss_sum / max(1, val_batches)
+            val_recon = val_recon_sum / max(1, val_batches)
+            val_kl = val_kl_sum / max(1, val_batches)
+
+            checkpoint = {
+                "model_state_dict": model.state_dict(),
+                "state_mean": state_mean,
+                "state_std": state_std,
+                "action_mean": action_mean,
+                "action_std": action_std,
+                "config": asdict(config),
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "train_recon": train_recon,
+                "train_kl": train_kl,
+                "val_loss": val_loss,
+                "val_recon": val_recon,
+                "val_kl": val_kl,
+                "source_model_path": config.model_path,
+                "data_stats": data_stats,
+                "mix_stats": {
+                    "include_original_data": bool(config.include_original_data),
+                    "mix_dagger_ratio": float(config.mix_dagger_ratio),
+                    "mix_original_ratio": float(config.mix_original_ratio),
+                    "dagger_train_steps": int(len(train_idx)),
+                    "dagger_val_steps": int(len(val_idx)),
+                    "original_train_steps": int(len(original_data["train_idx"])) if original_data is not None else 0,
+                    "original_val_steps": int(len(original_data["val_idx"])) if original_data is not None else 0,
+                },
+            }
+
+            latest_path = os.path.join(config.output_dir, "latest.pt")
+            torch.save(checkpoint, latest_path)
+            if val_loss < best_val:
+                best_val = val_loss
+                best_path = os.path.join(config.output_dir, "best.pt")
+                torch.save(checkpoint, best_path)
+                if wandb_run is not None:
+                    wandb.log({"best/val_loss": float(best_val)}, step=epoch)
+
+            print(
+                f"Epoch {epoch:03d}/{config.epochs} | "
+                f"kl_beta={epoch_kl_beta:.6f} | "
+                f"train={train_loss:.6f} (recon={train_recon:.6f}, kl={train_kl:.6f}) | "
+                f"val={val_loss:.6f} (recon={val_recon:.6f}, kl={val_kl:.6f})"
+            )
+            if wandb_run is not None:
+                wandb.log(
+                    {
+                        "epoch": epoch,
+                        "train/loss": float(train_loss),
+                        "val/loss": float(val_loss),
+                        "train/recon_loss": float(train_recon),
+                        "train/kl_loss": float(train_kl),
+                        "val/recon_loss": float(val_recon),
+                        "val/kl_loss": float(val_kl),
+                        "train/kl_beta": float(epoch_kl_beta),
+                    },
+                    step=epoch,
+                )
+
+        if wandb_run is not None:
+            wandb_run.summary["best_val_loss"] = float(best_val)
+    finally:
+        if wandb_run is not None:
+            wandb.finish()
 
     with open(os.path.join(config.output_dir, "config.json"), "w", encoding="utf-8") as file:
         json.dump(asdict(config), file, indent=2)
@@ -651,8 +712,8 @@ def parse_args() -> FinetuneConfig:
     parser.add_argument("--include_failed_autonomous", action="store_true", default=False)
     parser.add_argument("--include_original_data", action="store_true", default=True)
     parser.add_argument("--no_include_original_data", dest="include_original_data", action="store_false")
-    parser.add_argument("--mix_dagger_ratio", type=float, default=0.5)
-    parser.add_argument("--mix_original_ratio", type=float, default=0.5)
+    parser.add_argument("--mix_dagger_ratio", type=float, default=0.7)
+    parser.add_argument("--mix_original_ratio", type=float, default=0.3)
     parser.add_argument("--success_only", action="store_true", default=True)
     parser.add_argument("--no_success_only", dest="success_only", action="store_false")
     parser.add_argument("--seed", type=int, default=42)
@@ -672,6 +733,9 @@ def parse_args() -> FinetuneConfig:
     parser.add_argument("--nhead", type=int, default=8)
     parser.add_argument("--num_decoder_layers", type=int, default=7)
     parser.add_argument("--ensemble_decay", type=float, default=0.05)
+    parser.add_argument("--wandb", action="store_true", default=False)
+    parser.add_argument("--wandb_project", type=str, default=None)
+    parser.add_argument("--wandb_entity", type=str, default=None)
     args = parser.parse_args()
 
     return FinetuneConfig(
@@ -704,6 +768,9 @@ def parse_args() -> FinetuneConfig:
         nhead=args.nhead,
         num_decoder_layers=args.num_decoder_layers,
         ensemble_decay=args.ensemble_decay,
+        wandb=args.wandb,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
     )
 
 

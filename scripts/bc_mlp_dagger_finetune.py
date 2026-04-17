@@ -27,6 +27,11 @@ if REPO_ROOT not in sys.path:
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from models.bc_mlp import BehavioralCloningPolicy
 
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
 @dataclass
 class FinetuneConfig:
     model_path: str = "models/pretrain_stack/best.pt"
@@ -47,6 +52,9 @@ class FinetuneConfig:
     learning_rate: float = 1e-5
     weight_decay: float = 1e-5
     seed: int = 42
+    wandb: bool = False
+    wandb_project: str | None = None
+    wandb_entity: str | None = None
 
 
 class DaggerNPZDataset(Dataset):
@@ -159,6 +167,21 @@ def _build_mixed_loader(dagger_ds, original_ds, dagger_ratio, original_ratio, ba
 def train(config: FinetuneConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(config.output_dir, exist_ok=True)
+
+    wandb_run = None
+    if config.wandb:
+        if wandb is None:
+            raise ImportError("wandb is not installed. Install dependencies from requirements.txt or disable --wandb.")
+        if not config.wandb_project or not config.wandb_entity:
+            raise ValueError("--wandb requires both --wandb_project and --wandb_entity")
+        run_name = f"{Path(config.output_dir).name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        wandb_run = wandb.init(
+            project=config.wandb_project,
+            entity=config.wandb_entity,
+            name=run_name,
+            config=asdict(config),
+            tags=["bc_mlp", "dagger_finetune"],
+        )
     
     # 1. Load Normalization Stats
     checkpoint = torch.load(config.model_path, map_location=device, weights_only=False)
@@ -194,6 +217,17 @@ def train(config: FinetuneConfig):
     train_loader = _build_mixed_loader(dagger_train, o_train_ds, config.mix_dagger_ratio, config.mix_original_ratio, config.batch_size, config.seed, True)
     val_loader = _build_mixed_loader(dagger_val, o_val_ds, config.mix_dagger_ratio, config.mix_original_ratio, config.batch_size, config.seed+1, True)
 
+    if wandb_run is not None:
+        wandb.log(
+            {
+                "data/dagger_train_steps": int(len(dagger_train)),
+                "data/dagger_val_steps": int(len(dagger_val)),
+                "data/original_train_steps": int(len(o_train_ds)),
+                "data/original_val_steps": int(len(o_val_ds)),
+            },
+            step=0,
+        )
+
     # 3. Model Setup
     model = BehavioralCloningPolicy(n_frames=config.n_frames, hidden_dim=checkpoint['config']['hidden_dim']).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -201,48 +235,67 @@ def train(config: FinetuneConfig):
     loss_fn = nn.SmoothL1Loss()
 
     best_val = float("inf")
-    for epoch in range(1, config.epochs + 1):
-        model.train()
-        train_loss = 0
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch}"):
-            # Prepare Image: Normalize each frame in stack
-            imgs = batch["image"].to(device)
-            B, C_stack, H, W = imgs.shape
-            imgs = norm_tf(imgs.view(B*2, 3, H, W)).view(B, C_stack, H, W)
-            
-            # Prepare State/Action
-            states_norm = ((batch["state"].to(device) - s_mean) / s_std).view(B, -1)
-            actions_norm = (batch["action"].to(device) - a_mean) / a_std
-            
-            preds = model(imgs, states_norm)
-            loss = loss_fn(preds, actions_norm)
-            
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
-
-        # Validation
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for batch in val_loader:
+    try:
+        for epoch in range(1, config.epochs + 1):
+            model.train()
+            train_loss = 0
+            for batch in tqdm(train_loader, desc=f"Epoch {epoch}"):
+                # Prepare Image: Normalize each frame in stack
                 imgs = batch["image"].to(device)
-                imgs = norm_tf(imgs.view(-1, 3, 96, 96)).view(imgs.shape)
-                states_norm = ((batch["state"].to(device) - s_mean) / s_std).view(imgs.shape[0], -1)
+                B, C_stack, H, W = imgs.shape
+                imgs = norm_tf(imgs.view(B*2, 3, H, W)).view(B, C_stack, H, W)
+                
+                # Prepare State/Action
+                states_norm = ((batch["state"].to(device) - s_mean) / s_std).view(B, -1)
                 actions_norm = (batch["action"].to(device) - a_mean) / a_std
-                val_loss += loss_fn(model(imgs, states_norm), actions_norm).item()
-        
-        avg_v = val_loss / len(val_loader)
-        print(f"Epoch {epoch} | Train Loss: {train_loss/len(train_loader):.6f} | Val Loss: {avg_v:.6f}")
+                
+                preds = model(imgs, states_norm)
+                loss = loss_fn(preds, actions_norm)
+                
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
 
-        if avg_v < best_val:
-            best_val = avg_v
-            torch.save({
-                "model_state_dict": model.state_dict(), "state_mean": s_mean.cpu().numpy(),
-                "state_std": s_std.cpu().numpy(), "action_mean": a_mean.cpu().numpy(),
-                "action_std": a_std.cpu().numpy(), "config": checkpoint['config']
-            }, os.path.join(config.output_dir, "best.pt"))
+            # Validation
+            model.eval()
+            val_loss = 0
+            with torch.no_grad():
+                for batch in val_loader:
+                    imgs = batch["image"].to(device)
+                    imgs = norm_tf(imgs.view(-1, 3, 96, 96)).view(imgs.shape)
+                    states_norm = ((batch["state"].to(device) - s_mean) / s_std).view(imgs.shape[0], -1)
+                    actions_norm = (batch["action"].to(device) - a_mean) / a_std
+                    val_loss += loss_fn(model(imgs, states_norm), actions_norm).item()
+            
+            avg_t = train_loss / len(train_loader)
+            avg_v = val_loss / len(val_loader)
+            print(f"Epoch {epoch} | Train Loss: {avg_t:.6f} | Val Loss: {avg_v:.6f}")
+            if wandb_run is not None:
+                wandb.log(
+                    {
+                        "epoch": epoch,
+                        "train/loss": float(avg_t),
+                        "val/loss": float(avg_v),
+                    },
+                    step=epoch,
+                )
+
+            if avg_v < best_val:
+                best_val = avg_v
+                best_path = os.path.join(config.output_dir, "best.pt")
+                torch.save({
+                    "model_state_dict": model.state_dict(), "state_mean": s_mean.cpu().numpy(),
+                    "state_std": s_std.cpu().numpy(), "action_mean": a_mean.cpu().numpy(),
+                    "action_std": a_std.cpu().numpy(), "config": checkpoint['config']
+                }, best_path)
+                if wandb_run is not None:
+                    wandb.log({"best/val_loss": float(best_val)}, step=epoch)
+        if wandb_run is not None:
+            wandb_run.summary["best_val_loss"] = float(best_val)
+    finally:
+        if wandb_run is not None:
+            wandb.finish()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -251,9 +304,15 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="data/bc_mlp_dagger")
     parser.add_argument("--mix_dagger_ratio", type=float, default=0.6)
     parser.add_argument("--mix_original_ratio", type=float, default=0.4)
+    parser.add_argument("--wandb", action="store_true", default=False)
+    parser.add_argument("--wandb_project", type=str, default=None)
+    parser.add_argument("--wandb_entity", type=str, default=None)
     args = parser.parse_args()
     
     cfg = FinetuneConfig(model_path=args.model_path, output_dir=args.output_dir, 
                          data_dir=args.data_dir, mix_dagger_ratio=args.mix_dagger_ratio, 
-                         mix_original_ratio=args.mix_original_ratio)
+                         mix_original_ratio=args.mix_original_ratio,
+                         wandb=args.wandb,
+                         wandb_project=args.wandb_project,
+                         wandb_entity=args.wandb_entity)
     train(cfg)
