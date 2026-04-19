@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Train ACT policy on lerobot/pusht using chunked action supervision."""
-
+"""
+python scripts/act_train.py --output_dir models/act_wandb --wandb --wandb_project introML-proj-graphs --wandb_entity yizhoul2-carnegie-mellon-university
+"""
 import argparse
 import json
 import os
