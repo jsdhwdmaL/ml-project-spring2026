@@ -29,7 +29,7 @@ from lerobot.policies.factory import make_pre_post_processors
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/lerobot_act_og_batch64", "Path to model directory or ckpt_step_*.pt checkpoint")
+flags.DEFINE_string("model_path", "models/lerobot_official_model", "Path to model directory or ckpt_step_*.pt checkpoint")
 flags.DEFINE_integer("num_seeds", 5, "Number of episodes to evaluate")
 flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using 0..num_seeds-1")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz")
@@ -40,7 +40,7 @@ flags.DEFINE_float("action_min", 0.0, "Minimum action value after postprocessing
 flags.DEFINE_float("action_max", 512.0, "Maximum action value after postprocessing")
 flags.DEFINE_float(
 	"temporal_ensemble_coeff",
-	0.01,
+	-1,
 	"Temporal ensembling coefficient. Set >=0 to override config and enable ensembling; -1 keeps model config.",
 )
 
