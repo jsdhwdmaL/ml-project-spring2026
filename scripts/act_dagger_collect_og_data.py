@@ -37,7 +37,7 @@ from models.act import ACTPolicy
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/act_og_data_50_epochs/latest.pt", "Path to pretrained 5-D ACT checkpoint")
+flags.DEFINE_string("model_path", "models/act_dagger1_og_data_25/latest.pt", "Path to pretrained 5-D ACT checkpoint")
 flags.DEFINE_string("output_dir", "data/act_dagger_og_data", "Directory to save collected data")
 flags.DEFINE_integer("num_seeds", 10, "Number of seeds to collect")
 flags.DEFINE_integer("fps", 10, "Control frequency")

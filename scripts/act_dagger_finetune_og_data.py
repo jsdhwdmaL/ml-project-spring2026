@@ -680,10 +680,10 @@ def train(config: FinetuneConfig) -> None:
 
 def parse_args() -> FinetuneConfig:
     parser = argparse.ArgumentParser(description="Fine-tune the 5-D Push-T zarr ACT model on DAgger episodes")
-    parser.add_argument("--model_path", type=str, default="models/act_og_data_50_epochs/latest.pt")
+    parser.add_argument("--model_path", type=str, default="models/act_dagger1_og_data_25/latest.pt")
     parser.add_argument("--data_dir", type=str, default="data/act_dagger_og_data")
     parser.add_argument("--zarr_path", type=str, default="data/pusht/pusht_cchi_v7_replay.zarr")
-    parser.add_argument("--output_dir", type=str, default="models/act_dagger_og_data")
+    parser.add_argument("--output_dir", type=str, default="models/act_dagger2_og_data")
     parser.add_argument("--include_human_intervention", action="store_true", default=True)
     parser.add_argument("--no_include_human_intervention", dest="include_human_intervention", action="store_false")
     parser.add_argument("--include_rejection_sample", action="store_true", default=True)
@@ -691,8 +691,8 @@ def parse_args() -> FinetuneConfig:
     parser.add_argument("--include_failed_autonomous", action="store_true", default=False)
     parser.add_argument("--include_original_data", action="store_true", default=True)
     parser.add_argument("--no_include_original_data", dest="include_original_data", action="store_false")
-    parser.add_argument("--mix_dagger_ratio", type=float, default=0.5)
-    parser.add_argument("--mix_original_ratio", type=float, default=0.5)
+    parser.add_argument("--mix_dagger_ratio", type=float, default=0.33)
+    parser.add_argument("--mix_original_ratio", type=float, default=0.67)
     parser.add_argument("--success_only", action="store_true", default=True)
     parser.add_argument("--no_success_only", dest="success_only", action="store_false")
     parser.add_argument("--seed", type=int, default=42)

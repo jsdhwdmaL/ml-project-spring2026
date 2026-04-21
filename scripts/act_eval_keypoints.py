@@ -1,9 +1,11 @@
-"""Evaluate ACT checkpoints trained on the local Push-T zarr buffer.
+"""Evaluate ACT checkpoints trained on LeRobot ``pusht_keypoints`` (state-only).
 
-Mirrors `scripts/act_eval.py` but for models trained by
-`scripts/act_train_pusht.py`, where the policy expects a 5-D state vector
-``[agent_x, agent_y, block_x, block_y, block_theta]`` (matching pymunk's
-ground-truth Push-T state) and a vision input from the rendered frame.
+Mirrors ``scripts/act_eval_og_data.py`` but for models from
+``scripts/act_train_keypoints.py`` where the policy expects an 18-D state
+``concat(agent_pos, environment_state)`` and NO image input. The environment
+is gym_pusht with ``obs_type="environment_state_agent_pos"`` which returns
+``{"agent_pos": (2,), "environment_state": (16,)}`` in pixel coordinates,
+matching the training dataset. Normalization is ``min_max`` to/from [-1, 1].
 """
 
 import warnings
@@ -13,35 +15,34 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated", categor
 
 import os
 import sys
+import time
 import numpy as np
 import torch
-import torchvision.transforms as T
 import gymnasium as gym
 import pygame
 from absl import app, flags
 import imageio
-import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import gym_pusht  # noqa: F401  (registers gym_pusht/PushT-v0)
-from envs.interactive_utils import get_observation_image, draw_status_overlay, ControlState
+from envs.interactive_utils import draw_status_overlay, ControlState
 from models.act import ACTPolicy
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/act_pusht/best.pt", "Path to trained ACT checkpoint (zarr-trained)")
-flags.DEFINE_integer("num_seeds", 5, "Number of episodes to evaluate")
+flags.DEFINE_string("model_path", "models/act_keypoints/best.pt", "Path to trained ACT keypoints checkpoint")
+flags.DEFINE_integer("num_seeds", 50, "Number of episodes to evaluate")
 flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using 0..num_seeds-1")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
 flags.DEFINE_float("ensemble_decay", 0.01, "Override temporal ensembling decay; <0 uses checkpoint")
 flags.DEFINE_boolean("save_video", True, "Save episodes as an MP4 video")
-flags.DEFINE_string("video_dir", "videos/act_pusht", "Directory to save episode videos")
-flags.DEFINE_boolean("temporal_agg", True, "Enable temporal ensembling (query model every step, blend predictions)")
+flags.DEFINE_string("video_dir", "videos/act_keypoints", "Directory to save episode videos")
+flags.DEFINE_boolean("temporal_agg", True, "Enable temporal ensembling")
 flags.DEFINE_integer(
     "query_frequency",
     1,
@@ -76,6 +77,13 @@ def capture_frame(env) -> Optional[np.ndarray]:
     return np.transpose(pygame.surfarray.array3d(surface), (1, 0, 2))
 
 
+def build_state_vector(obs: dict) -> np.ndarray:
+    """Compose the 18-D state: concat(agent_pos, environment_state)."""
+    agent_pos = np.asarray(obs["agent_pos"], dtype=np.float32).reshape(-1)
+    env_state = np.asarray(obs["environment_state"], dtype=np.float32).reshape(-1)
+    return np.concatenate([agent_pos, env_state], axis=0)
+
+
 def main(_):
     if FLAGS.on_cuda and not torch.cuda.is_available():
         raise ValueError("--on_cuda=true was requested but CUDA is not available.")
@@ -97,27 +105,42 @@ def main(_):
     else:
         success_thresh = float(FLAGS.success_threshold)
 
-    print(f"Loading ACT model from {FLAGS.model_path} onto {device}...")
-
+    print(f"Loading ACT keypoints model from {FLAGS.model_path} onto {device}...")
     checkpoint = torch.load(FLAGS.model_path, map_location=device, weights_only=False)
     config = checkpoint.get("config", {})
 
-    horizon = int(config.get("horizon", 20))
-    hidden_dim = int(config.get("hidden_dim", 256))
+    norm_mode = str(config.get("norm_mode", "min_max"))
+    if norm_mode != "min_max":
+        raise ValueError(
+            f"Expected norm_mode='min_max' for keypoints checkpoints, got '{norm_mode}'. "
+            f"Use scripts/act_eval_og_data.py or scripts/act_eval.py for mean/std checkpoints."
+        )
+    for key in ("state_min", "state_max", "action_min", "action_max"):
+        if key not in checkpoint:
+            raise KeyError(
+                f"Checkpoint missing required key '{key}'. This script is for keypoints "
+                f"checkpoints saved by scripts/act_train_keypoints.py."
+            )
+
+    horizon = int(config.get("horizon", 16))
+    hidden_dim = int(config.get("hidden_dim", 512))
     latent_dim = int(config.get("latent_dim", 32))
     nhead = int(config.get("nhead", 8))
     num_encoder_layers = int(config.get("num_encoder_layers", 4))
-    num_decoder_layers = int(config.get("num_decoder_layers", 7))
+    num_decoder_layers = int(config.get("num_decoder_layers", 4))
     ckpt_decay = float(config.get("ensemble_decay", 0.05))
     ensemble_decay = ckpt_decay if FLAGS.ensemble_decay < 0 else FLAGS.ensemble_decay
 
-    state_mean_np = np.asarray(checkpoint["state_mean"], dtype=np.float32)
-    state_dim = int(state_mean_np.shape[0])
-    if state_dim != 5:
+    state_min_np = np.asarray(checkpoint["state_min"], dtype=np.float32)
+    state_max_np = np.asarray(checkpoint["state_max"], dtype=np.float32)
+    action_min_np = np.asarray(checkpoint["action_min"], dtype=np.float32)
+    action_max_np = np.asarray(checkpoint["action_max"], dtype=np.float32)
+    state_dim = int(state_min_np.shape[0])
+    action_dim = int(action_min_np.shape[0])
+    if state_dim != 18:
         raise ValueError(
-            f"This script targets the local Push-T zarr ACT model (state_dim=5), "
-            f"but checkpoint has state_dim={state_dim}. "
-            f"Use scripts/act_eval.py for 2-D agent-only models."
+            f"This script targets the LeRobot pusht_keypoints ACT model (state_dim=18), "
+            f"but checkpoint has state_dim={state_dim}."
         )
 
     temporal_agg: bool = FLAGS.temporal_agg
@@ -125,56 +148,49 @@ def main(_):
 
     model = ACTPolicy(
         state_dim=state_dim,
-        action_dim=2,
+        action_dim=action_dim,
         horizon=horizon,
         hidden_dim=hidden_dim,
         latent_dim=latent_dim,
         nhead=nhead,
         num_encoder_layers=num_encoder_layers,
         num_decoder_layers=num_decoder_layers,
-        use_vision=True,
+        use_vision=False,
     ).to(device)
-    model_state = normalize_state_dict_keys_for_eval(checkpoint["model_state_dict"])
-    model.load_state_dict(model_state)
+    model.load_state_dict(normalize_state_dict_keys_for_eval(checkpoint["model_state_dict"]))
     model.eval()
 
-    state_mean = torch.tensor(state_mean_np, dtype=torch.float32, device=device)
-    state_std = torch.tensor(checkpoint["state_std"], dtype=torch.float32, device=device)
-    action_mean = torch.tensor(checkpoint["action_mean"], dtype=torch.float32, device=device)
-    action_std = torch.tensor(checkpoint["action_std"], dtype=torch.float32, device=device)
-    action_dim = int(action_mean.shape[-1])
-
-    base_transform = T.Compose([
-        T.ToTensor(),
-        T.Resize((96, 96), antialias=True),
-    ])
-    normalize_transform = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    state_min = torch.tensor(state_min_np, dtype=torch.float32, device=device)
+    state_max = torch.tensor(state_max_np, dtype=torch.float32, device=device)
+    action_min = torch.tensor(action_min_np, dtype=torch.float32, device=device)
+    action_max = torch.tensor(action_max_np, dtype=torch.float32, device=device)
 
     window_size = int(512 * FLAGS.window_scale)
     fast_mode = bool(FLAGS.on_cuda)
     render_mode = "rgb_array" if fast_mode else "human"
     env = gym.make(
         "gym_pusht/PushT-v0",
-        obs_type="state",  # 5-D flat numpy: [agent_xy, block_xy, block_theta]
+        obs_type="environment_state_agent_pos",  # {'agent_pos': (2,), 'environment_state': (16,)}
         render_mode=render_mode,
         visualization_width=window_size,
         visualization_height=window_size,
     )
     env = gym.wrappers.TimeLimit(env, max_episode_steps=FLAGS.max_steps)
 
-    print("\nStarting ACT (Push-T zarr) Evaluation...")
+    print("\nStarting ACT (LeRobot pusht_keypoints) Evaluation...")
     print(
         f"H={horizon} | ensemble_decay={ensemble_decay} | state_dim={state_dim} | "
-        f"fast_mode={fast_mode}"
+        f"action_dim={action_dim} | fast_mode={fast_mode}"
     )
     success_count = 0
+    coverages: List[float] = []
 
     seeds = (
         np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist()
         if FLAGS.random_seeds
         else list(range(FLAGS.num_seeds))
     )
-    frames: List[np.ndarray] = []  # for video export
+    frames: List[np.ndarray] = []
 
     for i, seed in enumerate(seeds):
         obs, _ = env.reset(seed=int(seed))
@@ -203,28 +219,22 @@ def main(_):
                         env.close()
                         return
 
-            # 5-D state vector straight from the env (obs_type="state").
-            state_vec = np.asarray(obs, dtype=np.float32).reshape(-1)
+            state_vec = build_state_vector(obs)
             if state_vec.shape[0] != state_dim:
                 raise ValueError(
-                    f"env returned state of length {state_vec.shape[0]} but model expects {state_dim}"
+                    f"env produced state of length {state_vec.shape[0]} but model expects {state_dim}"
                 )
             agent_pos = state_vec[:2]
 
             state_tensor = torch.tensor(state_vec, dtype=torch.float32, device=device).unsqueeze(0)
-            state_tensor_norm = (state_tensor - state_mean) / state_std
-
-            if fast_mode:
-                img_array = latest_render if latest_render is not None else env.render()
-            else:
-                img_array = get_observation_image(env)
-            image_tensor = base_transform(img_array)
-            image_tensor = normalize_transform(image_tensor).unsqueeze(0).to(device)
+            state_tensor_norm = 2.0 * (state_tensor - state_min) / (state_max - state_min) - 1.0
 
             if step % query_frequency == 0:
                 with torch.no_grad():
-                    pred_norm_chunk, _, _ = model(image_tensor, state_tensor_norm, action_chunk=None)
-                pred_chunk = (pred_norm_chunk * action_std.view(1, 1, -1)) + action_mean.view(1, 1, -1)
+                    pred_norm_chunk, _, _ = model(None, state_tensor_norm, action_chunk=None)
+                pred_chunk = (pred_norm_chunk + 1.0) * 0.5 * (
+                    action_max.view(1, 1, -1) - action_min.view(1, 1, -1)
+                ) + action_min.view(1, 1, -1)
 
                 if temporal_agg:
                     all_time_actions[[step], step : step + horizon] = pred_chunk
@@ -253,7 +263,7 @@ def main(_):
                 max_coverage = coverage
             success = max_coverage >= success_thresh
             if success:
-                truncated = True  # end episode as soon as user threshold is reached
+                truncated = True
 
             step += 1
             if step >= FLAGS.max_steps:
@@ -284,6 +294,7 @@ def main(_):
 
                 clock.tick(FLAGS.fps)
 
+        coverages.append(max_coverage)
         if success:
             success_count += 1
             tag = "SUCCESS"
@@ -299,11 +310,14 @@ def main(_):
                 frames.append(frames[-1])
 
     print("=" * 60)
+    mean_cov = float(np.mean(coverages)) if coverages else 0.0
+    max_cov = float(np.max(coverages)) if coverages else 0.0
     print(
-        f"ACT (Push-T zarr) Evaluation Complete! Success Rate: "
+        f"ACT (pusht_keypoints) Evaluation Complete! Success Rate: "
         f"{success_count}/{FLAGS.num_seeds} ({(success_count / FLAGS.num_seeds) * 100:.1f}%) "
         f"@ threshold={success_thresh:.2f}"
     )
+    print(f"Mean max-coverage: {mean_cov:.3f} | Best max-coverage: {max_cov:.3f}")
     print("=" * 60)
 
     if FLAGS.save_video and frames:
