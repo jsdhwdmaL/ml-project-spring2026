@@ -18,13 +18,11 @@ action chunks never include policy-generated steps.
 
 Examples:
     python scripts/act_dagger_finetune_keypoints.py \
-        --model_path models/act_keypoints/best.pt \
+        --model_path models/act_keypoints_3200/latest.pt \
         --data_dir   data/act_dagger_keypoints \
-        --output_dir models/act_dagger_keypoints
-
-    python scripts/act_dagger_finetune_keypoints.py \
-        --keep_only_human --no_include_original_data \
-        --no_include_rejection_sample --no_include_failed_autonomous
+        --output_dir models/act_dagger_keypoints \
+        --wandb --wandb_project introML-proj-graphs \
+        --wandb_entity yizhoul2-carnegie-mellon-university
 """
 
 import argparse
@@ -67,21 +65,21 @@ EXPECTED_ACTION_DIM = 2
 
 @dataclass
 class FinetuneConfig:
-    model_path: str = "models/act_keypoints/best.pt"
+    model_path: str = "models/act_keypoints_3200/latest.pt"
     data_dir: str = "data/act_dagger_keypoints"
     dataset_id: str = "lerobot/pusht_keypoints"
     output_dir: str = "models/act_dagger_keypoints"
     include_human_intervention: bool = True
-    include_rejection_sample: bool = True
+    include_rejection_sample: bool = False
     include_failed_autonomous: bool = False
     include_original_data: bool = True
-    mix_dagger_ratio: float = 0.5
-    mix_original_ratio: float = 0.5
+    mix_dagger_ratio: float = 0.2
+    mix_original_ratio: float = 0.8
     success_only: bool = True
-    keep_only_human: bool = False
+    keep_only_human: bool = True
     seed: int = 42
     val_ratio: float = 0.1
-    epochs: int = 250
+    epochs: int = 150
     batch_size: int = 64
     learning_rate: float = 3e-5
     weight_decay: float = 1e-4

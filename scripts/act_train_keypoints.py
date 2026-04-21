@@ -45,7 +45,7 @@ DEFAULT_LEROBOT_CFG: Dict = {
     "dim_feedforward": 3200,
     "dim_model": 512,
     "dropout": 0.1,
-    "feedforward_activation": "relu",
+    "feedforward_activation": "gelu",
     "input_normalization_modes": {
         "observation.environment_state": "min_max",
         "observation.state": "min_max",
