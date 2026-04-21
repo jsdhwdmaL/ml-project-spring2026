@@ -85,7 +85,9 @@ class FinetuneConfig:
     batch_size: int = 64
     learning_rate: float = 1e-5
     weight_decay: float = 1e-4
-    # kl_warmup/ramp scale the kl_weight from lerobot_cfg over training.
+    # kl_weight: if None, inherit lerobot_cfg.kl_weight from the base checkpoint.
+    # kl_warmup/ramp scale the (resolved) kl_weight over training.
+    kl_weight: float | None = None
     kl_warmup_epochs: int = 0
     kl_ramp_epochs: int = 0
     num_workers: int = 0
@@ -385,7 +387,9 @@ def train(config: FinetuneConfig) -> None:
     base_checkpoint = torch.load(config.model_path, map_location=device, weights_only=False)
     lerobot_cfg = _load_lerobot_cfg_from_checkpoint(base_checkpoint)
     horizon = int(lerobot_cfg.chunk_size)
-    base_kl_weight = float(lerobot_cfg.kl_weight)
+    base_kl_weight = (
+        float(config.kl_weight) if config.kl_weight is not None else float(lerobot_cfg.kl_weight)
+    )
 
     ckpt_state_min = np.asarray(base_checkpoint["state_min"], dtype=np.float32)
     state_dim = int(ckpt_state_min.shape[0])
@@ -682,6 +686,12 @@ def parse_args() -> FinetuneConfig:
     parser.add_argument("--batch_size", type=int, default=defaults.batch_size)
     parser.add_argument("--learning_rate", type=float, default=defaults.learning_rate)
     parser.add_argument("--weight_decay", type=float, default=defaults.weight_decay)
+    parser.add_argument(
+        "--kl_weight",
+        type=float,
+        default=defaults.kl_weight,
+        help="Override kl_weight for finetuning (default: inherit from base checkpoint's lerobot_cfg.kl_weight)",
+    )
     parser.add_argument("--kl_warmup_epochs", type=int, default=defaults.kl_warmup_epochs)
     parser.add_argument("--kl_ramp_epochs", type=int, default=defaults.kl_ramp_epochs)
     parser.add_argument("--num_workers", type=int, default=defaults.num_workers)
