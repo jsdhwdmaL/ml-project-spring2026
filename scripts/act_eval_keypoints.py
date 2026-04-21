@@ -8,7 +8,7 @@ is gym_pusht with ``obs_type="environment_state_agent_pos"`` which returns
 matching the training dataset. Normalization is ``min_max`` to/from [-1, 1].
 
 python scripts/act_eval_keypoints.py \
-    --model_path models/act_keypoints/latest.pt \
+    --model_path models/act_keypoints_150_epochs_3200/latest.pt \
     --num_seeds 10
 """
 
@@ -33,7 +33,10 @@ if REPO_ROOT not in sys.path:
 
 import gym_pusht  # noqa: F401  (registers gym_pusht/PushT-v0)
 from envs.interactive_utils import draw_status_overlay, ControlState
-from models.act import ACTPolicy
+from models.act_lerobot import ACTLeRobotConfig, ACTLeRobotPolicy
+
+AGENT_POS_DIM = 2
+ENV_STATE_DIM = 16
 
 FLAGS = flags.FLAGS
 
@@ -67,7 +70,7 @@ flags.DEFINE_boolean(
 )
 flags.DEFINE_float(
     "success_threshold",
-    0.9,
+    0.95,
     "Coverage fraction in (0, 1] required to count as success. "
     "Note: gym_pusht auto-terminates at 0.95, so values >0.95 are clamped to 0.95.",
 )
@@ -94,6 +97,14 @@ def build_state_vector(obs: dict) -> np.ndarray:
     agent_pos = np.asarray(obs["agent_pos"], dtype=np.float32).reshape(-1)
     env_state = np.asarray(obs["environment_state"], dtype=np.float32).reshape(-1)
     return np.concatenate([agent_pos, env_state], axis=0)
+
+
+def split_state_to_obs(state: torch.Tensor) -> dict:
+    """Split the 18-D normalized state into the dict ACTLeRobotPolicy expects."""
+    return {
+        "observation.state": state[..., :AGENT_POS_DIM],
+        "observation.environment_state": state[..., AGENT_POS_DIM:],
+    }
 
 
 def main(_):
@@ -136,12 +147,17 @@ def main(_):
                 f"checkpoints saved by scripts/act_train_keypoints.py."
             )
 
-    horizon = int(config.get("horizon", 16))
-    hidden_dim = int(config.get("hidden_dim", 512))
-    latent_dim = int(config.get("latent_dim", 32))
-    nhead = int(config.get("nhead", 8))
-    num_encoder_layers = int(config.get("num_encoder_layers", 4))
-    num_decoder_layers = int(config.get("num_decoder_layers", 4))
+    lerobot_cfg_dict = checkpoint.get("lerobot_cfg")
+    if lerobot_cfg_dict is None:
+        lerobot_cfg_dict = config.get("lerobot_cfg")
+    if lerobot_cfg_dict is None:
+        raise KeyError(
+            "Checkpoint missing 'lerobot_cfg'. This script only loads ACTLeRobotPolicy "
+            "checkpoints saved by the updated scripts/act_train_keypoints.py "
+            "(or scripts/act_dagger_finetune_keypoints.py)."
+        )
+
+    horizon = int(lerobot_cfg_dict.get("chunk_size", 16))
     ckpt_decay = float(config.get("ensemble_decay", 0.05))
     ensemble_decay = ckpt_decay if FLAGS.ensemble_decay < 0 else FLAGS.ensemble_decay
 
@@ -151,10 +167,10 @@ def main(_):
     action_max_np = np.asarray(checkpoint["action_max"], dtype=np.float32)
     state_dim = int(state_min_np.shape[0])
     action_dim = int(action_min_np.shape[0])
-    if state_dim != 18:
+    if state_dim != AGENT_POS_DIM + ENV_STATE_DIM:
         raise ValueError(
-            f"This script targets the LeRobot pusht_keypoints ACT model (state_dim=18), "
-            f"but checkpoint has state_dim={state_dim}."
+            f"This script targets the LeRobot pusht_keypoints ACT model "
+            f"(state_dim={AGENT_POS_DIM + ENV_STATE_DIM}), but checkpoint has state_dim={state_dim}."
         )
 
     temporal_agg: bool = FLAGS.temporal_agg
@@ -165,17 +181,7 @@ def main(_):
     else:
         query_frequency = max(1, min(FLAGS.query_frequency, horizon))
 
-    model = ACTPolicy(
-        state_dim=state_dim,
-        action_dim=action_dim,
-        horizon=horizon,
-        hidden_dim=hidden_dim,
-        latent_dim=latent_dim,
-        nhead=nhead,
-        num_encoder_layers=num_encoder_layers,
-        num_decoder_layers=num_decoder_layers,
-        use_vision=False,
-    ).to(device)
+    model = ACTLeRobotPolicy(ACTLeRobotConfig.from_dict(lerobot_cfg_dict)).to(device)
     model.load_state_dict(normalize_state_dict_keys_for_eval(checkpoint["model_state_dict"]))
     model.eval()
 
@@ -255,7 +261,8 @@ def main(_):
 
             if step % query_frequency == 0:
                 with torch.no_grad():
-                    pred_norm_chunk, _, _ = model(None, state_tensor_norm, action_chunk=None)
+                    obs_dict = split_state_to_obs(state_tensor_norm)
+                    pred_norm_chunk, _, _ = model(obs_dict, action_chunk=None)
                 pred_chunk = (pred_norm_chunk + 1.0) * 0.5 * (
                     action_max.view(1, 1, -1) - action_min.view(1, 1, -1)
                 ) + action_min.view(1, 1, -1)
