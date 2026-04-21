@@ -27,7 +27,8 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string("model_path", "models/act_20/best.pt", "Path to trained ACT checkpoint")
 flags.DEFINE_integer("num_seeds", 50, "Number of episodes to evaluate")
-flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using 0..num_seeds-1")
+flags.DEFINE_integer("seed", 42, "Global seed for numpy/torch and the env-seed sequence (matches LeRobot's deterministic eval semantics)")
+flags.DEFINE_boolean("random_seeds", False, "If True, draw env seeds from the seeded RNG; if False, use sequential seeds [seed, seed+num_seeds)")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
@@ -116,6 +117,8 @@ def normalize_state_dict_keys_for_eval(state_dict: dict[str, torch.Tensor]) -> d
     return state_dict
 
 def main(_):
+    np.random.seed(FLAGS.seed)
+    torch.manual_seed(FLAGS.seed)
     if FLAGS.on_cuda and not torch.cuda.is_available():
         raise ValueError("--on_cuda=true was requested but CUDA is not available.")
     device = torch.device(
@@ -211,7 +214,11 @@ def main(_):
     per_episode_max_reward: List[float] = []
     per_episode_sum_reward: List[float] = []
 
-    seeds = np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist() if FLAGS.random_seeds else range(FLAGS.num_seeds)
+    seeds = (
+        np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist()
+        if FLAGS.random_seeds
+        else list(range(FLAGS.seed, FLAGS.seed + FLAGS.num_seeds))
+    )
     frames: List[np.ndarray] = [] # for video export
 
     for i, seed in enumerate(seeds):

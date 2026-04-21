@@ -6,6 +6,10 @@ Mirrors ``scripts/act_eval_og_data.py`` but for models from
 is gym_pusht with ``obs_type="environment_state_agent_pos"`` which returns
 ``{"agent_pos": (2,), "environment_state": (16,)}`` in pixel coordinates,
 matching the training dataset. Normalization is ``min_max`` to/from [-1, 1].
+
+python scripts/act_eval_keypoints.py \
+    --model_path models/act_keypoints/latest.pt \
+    --num_seeds 10
 """
 
 import warnings
@@ -35,18 +39,26 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string("model_path", "models/act_keypoints/best.pt", "Path to trained ACT keypoints checkpoint")
 flags.DEFINE_integer("num_seeds", 50, "Number of episodes to evaluate")
-flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using 0..num_seeds-1")
+flags.DEFINE_integer("seed", 42, "Global seed for numpy/torch and the env-seed sequence (matches LeRobot's deterministic eval semantics)")
+flags.DEFINE_boolean("random_seeds", True, "If True, draw env seeds from the seeded RNG; if False, use sequential seeds [seed, seed+num_seeds)")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
-flags.DEFINE_float("ensemble_decay", 0.01, "Override temporal ensembling decay; <0 uses checkpoint")
+flags.DEFINE_float("ensemble_decay",0.05, "Override temporal ensembling decay; <0 uses checkpoint")
 flags.DEFINE_boolean("save_video", True, "Save episodes as an MP4 video")
 flags.DEFINE_string("video_dir", "videos/act_keypoints", "Directory to save episode videos")
-flags.DEFINE_boolean("temporal_agg", True, "Enable temporal ensembling")
+flags.DEFINE_boolean(
+    "temporal_agg",
+    True,
+    "Enable temporal ensembling. Set --notemporal_agg to run open-loop chunked "
+    "execution (matches LeRobot's temporal_ensemble_momentum=null).",
+)
 flags.DEFINE_integer(
     "query_frequency",
-    1,
-    "When temporal_agg is disabled, how many steps to execute from each predicted chunk before re-querying",
+    -1,
+    "When temporal_agg is disabled, how many steps to execute from each predicted "
+    "chunk before re-querying. <0 (default) means use the model's full horizon "
+    "(LeRobot's n_action_steps semantics).",
 )
 flags.DEFINE_boolean(
     "on_cuda",
@@ -85,6 +97,8 @@ def build_state_vector(obs: dict) -> np.ndarray:
 
 
 def main(_):
+    np.random.seed(FLAGS.seed)
+    torch.manual_seed(FLAGS.seed)
     if FLAGS.on_cuda and not torch.cuda.is_available():
         raise ValueError("--on_cuda=true was requested but CUDA is not available.")
     device = torch.device(
@@ -144,7 +158,12 @@ def main(_):
         )
 
     temporal_agg: bool = FLAGS.temporal_agg
-    query_frequency: int = 1 if temporal_agg else max(1, FLAGS.query_frequency)
+    if temporal_agg:
+        query_frequency = 1
+    elif FLAGS.query_frequency < 0:
+        query_frequency = horizon
+    else:
+        query_frequency = max(1, min(FLAGS.query_frequency, horizon))
 
     model = ACTPolicy(
         state_dim=state_dim,
@@ -178,8 +197,13 @@ def main(_):
     env = gym.wrappers.TimeLimit(env, max_episode_steps=FLAGS.max_steps)
 
     print("\nStarting ACT (LeRobot pusht_keypoints) Evaluation...")
+    mode_str = (
+        f"temporal_agg=ON (decay={ensemble_decay})"
+        if temporal_agg
+        else f"temporal_agg=OFF (open-loop, query_frequency={query_frequency})"
+    )
     print(
-        f"H={horizon} | ensemble_decay={ensemble_decay} | state_dim={state_dim} | "
+        f"H={horizon} | {mode_str} | state_dim={state_dim} | "
         f"action_dim={action_dim} | fast_mode={fast_mode}"
     )
     success_count = 0
@@ -188,7 +212,7 @@ def main(_):
     seeds = (
         np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist()
         if FLAGS.random_seeds
-        else list(range(FLAGS.num_seeds))
+        else list(range(FLAGS.seed, FLAGS.seed + FLAGS.num_seeds))
     )
     frames: List[np.ndarray] = []
 

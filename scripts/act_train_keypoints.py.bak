@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Train ACT policy on the local Push-T zarr replay buffer.
+"""Train ACT policy on the LeRobot ``pusht_keypoints`` dataset (state-only).
+
+State input is the 18-D concatenation
+``[observation.state (2) | observation.environment_state (16)]``.
 
 Example:
-    python scripts/act_train_og_data.py --output_dir models/act_og_data \
+    python scripts/act_train_keypoints.py --output_dir models/act_keypoints \
         --wandb --wandb_project introML-proj-graphs \
         --wandb_entity yizhoul2-carnegie-mellon-university
 """
@@ -16,15 +19,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from torchvision import transforms
 from tqdm import tqdm
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from data.dataloader_pusht import build_pusht_dataloaders
+from data.dataloader_keypoints import build_keypoints_dataloaders, min_max_normalize
 from models.act import ACTPolicy
 
 try:
@@ -35,56 +36,28 @@ except ImportError:
 
 @dataclass
 class TrainConfig:
-    zarr_path: str = "data/pusht/pusht_cchi_v7_replay.zarr"
-    output_dir: str = "models/act_pusht"
+    dataset_id: str = "lerobot/pusht_keypoints"
+    output_dir: str = "models/act_keypoints_100_epochs"
     seed: int = 42
     val_ratio: float = 0.1
-    epochs: int = 50
+    epochs: int = 100
     batch_size: int = 64
-    learning_rate: float = 1e-4
-    weight_decay: float = 1e-5
-    horizon: int = 20
-    state_dim: int = 5
+    learning_rate: float = 3e-5
+    weight_decay: float = 1e-4
+    horizon: int = 16
+    state_dim: int = 18
     action_dim: int = 2
-    hidden_dim: int = 256
+    hidden_dim: int = 512
     latent_dim: int = 32
     nhead: int = 8
     num_encoder_layers: int = 4
-    num_decoder_layers: int = 7
+    num_decoder_layers: int = 4
     kl_beta: float = 10.0
-    image_shift_px: int = 4
+    ensemble_decay: float = 0.01
     num_workers: int = 4
     wandb: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
-
-
-def random_shift_batch(images: torch.Tensor, max_shift: int) -> torch.Tensor:
-    if max_shift <= 0:
-        return images
-
-    b, c, h, w = images.shape
-    pad = int(max_shift)
-    padded = F.pad(images, (pad, pad, pad, pad), mode="replicate")
-    shift_y = torch.randint(0, 2 * pad + 1, (b,), device=images.device)
-    shift_x = torch.randint(0, 2 * pad + 1, (b,), device=images.device)
-
-    out = torch.empty_like(images)
-    for i in range(b):
-        y0 = int(shift_y[i].item())
-        x0 = int(shift_x[i].item())
-        out[i] = padded[i, :, y0 : y0 + h, x0 : x0 + w]
-    return out
-
-
-def preprocess_image_batch(
-    images: torch.Tensor, image_normalize, random_shift_px: int = 0
-) -> torch.Tensor:
-    # Images come from PushTZarrDataset already as (B,3,96,96) float32 in [0,1].
-    images = images.to(dtype=torch.float32)
-    images = random_shift_batch(images, max_shift=random_shift_px)
-    images = image_normalize(images)
-    return images
 
 
 def masked_l1_loss(pred: torch.Tensor, target: torch.Tensor, is_pad: torch.Tensor) -> torch.Tensor:
@@ -105,13 +78,10 @@ def train(config: TrainConfig) -> None:
         else "mps" if torch.backends.mps.is_available()
         else "cpu"
     )
-    image_normalize = transforms.Normalize(
-        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-    )
 
-    print(f"Loading Push-T zarr from {config.zarr_path}...")
-    bundle = build_pusht_dataloaders(
-        zarr_path=config.zarr_path,
+    print(f"Loading {config.dataset_id}...")
+    bundle = build_keypoints_dataloaders(
+        dataset_id=config.dataset_id,
         horizon=config.horizon,
         batch_size=config.batch_size,
         val_ratio=config.val_ratio,
@@ -119,7 +89,7 @@ def train(config: TrainConfig) -> None:
         num_workers=config.num_workers,
     )
     print(
-        f"Push-T loaded: {bundle.num_train} train steps, {bundle.num_val} val steps, "
+        f"Keypoints loaded: {bundle.num_train} train steps, {bundle.num_val} val steps, "
         f"state_dim={bundle.state_dim}, action_dim={bundle.action_dim}"
     )
 
@@ -146,15 +116,18 @@ def train(config: TrainConfig) -> None:
         nhead=config.nhead,
         num_encoder_layers=config.num_encoder_layers,
         num_decoder_layers=config.num_decoder_layers,
+        use_vision=False,
     ).to(device)
 
     num_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"training ACT with {num_parameters} trainable parameters")
+    print(f"training ACT (state-only) with {num_parameters} trainable parameters")
 
     wandb_run = None
     if config.wandb:
         if wandb is None:
-            raise ImportError("wandb is not installed. Install dependencies from requirements.txt or disable --wandb.")
+            raise ImportError(
+                "wandb is not installed. Install dependencies from requirements.txt or disable --wandb."
+            )
         if not config.wandb_project or not config.wandb_entity:
             raise ValueError("--wandb requires both --wandb_project and --wandb_entity")
         run_name = f"{Path(config.output_dir).name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -163,17 +136,17 @@ def train(config: TrainConfig) -> None:
             entity=config.wandb_entity,
             name=run_name,
             config=asdict(config),
-            tags=["act", "train", "pusht-zarr"],
+            tags=["act", "train", "pusht-keypoints"],
         )
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
     )
 
-    state_mean_t = torch.tensor(bundle.state_mean, dtype=torch.float32, device=device)
-    state_std_t = torch.tensor(bundle.state_std, dtype=torch.float32, device=device)
-    action_mean_t = torch.tensor(bundle.action_mean, dtype=torch.float32, device=device)
-    action_std_t = torch.tensor(bundle.action_std, dtype=torch.float32, device=device)
+    state_min_t = torch.tensor(bundle.state_min, dtype=torch.float32, device=device)
+    state_max_t = torch.tensor(bundle.state_max, dtype=torch.float32, device=device)
+    action_min_t = torch.tensor(bundle.action_min, dtype=torch.float32, device=device)
+    action_max_t = torch.tensor(bundle.action_max, dtype=torch.float32, device=device)
 
     best_val = float("inf")
 
@@ -186,19 +159,18 @@ def train(config: TrainConfig) -> None:
             train_batches = 0
 
             for batch in tqdm(bundle.train_loader, desc=f"Train {epoch}/{config.epochs}", leave=False):
-                images = preprocess_image_batch(
-                    batch["image"].to(device),
-                    image_normalize,
-                    random_shift_px=config.image_shift_px,
-                )
                 states_b = batch["state"].to(device)
                 action_chunk = batch["action_chunk"].to(device)
                 action_is_pad_b = batch["action_is_pad"].to(device)
 
-                states_norm = (states_b - state_mean_t) / state_std_t
-                target_actions = (action_chunk - action_mean_t.view(1, 1, -1)) / action_std_t.view(1, 1, -1)
+                states_norm = min_max_normalize(states_b, state_min_t, state_max_t)
+                target_actions = min_max_normalize(
+                    action_chunk,
+                    action_min_t.view(1, 1, -1),
+                    action_max_t.view(1, 1, -1),
+                )
 
-                pred_actions, mu, logvar = model(images, states_norm, target_actions)
+                pred_actions, mu, logvar = model(None, states_norm, target_actions)
                 recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
                 kl_loss = ACTPolicy.kl_divergence(mu, logvar)
                 loss = recon_loss + config.kl_beta * kl_loss
@@ -224,19 +196,18 @@ def train(config: TrainConfig) -> None:
             val_batches = 0
             with torch.no_grad():
                 for batch in tqdm(bundle.val_loader, desc=f"Val {epoch}/{config.epochs}", leave=False):
-                    images = preprocess_image_batch(
-                        batch["image"].to(device),
-                        image_normalize,
-                        random_shift_px=0,
-                    )
                     states_b = batch["state"].to(device)
                     action_chunk = batch["action_chunk"].to(device)
                     action_is_pad_b = batch["action_is_pad"].to(device)
 
-                    states_norm = (states_b - state_mean_t) / state_std_t
-                    target_actions = (action_chunk - action_mean_t.view(1, 1, -1)) / action_std_t.view(1, 1, -1)
+                    states_norm = min_max_normalize(states_b, state_min_t, state_max_t)
+                    target_actions = min_max_normalize(
+                        action_chunk,
+                        action_min_t.view(1, 1, -1),
+                        action_max_t.view(1, 1, -1),
+                    )
 
-                    pred_actions, mu, logvar = model(images, states_norm, target_actions)
+                    pred_actions, mu, logvar = model(None, states_norm, target_actions)
                     recon_loss = masked_l1_loss(pred_actions, target_actions, action_is_pad_b)
                     kl_loss = ACTPolicy.kl_divergence(mu, logvar)
                     loss = recon_loss + config.kl_beta * kl_loss
@@ -250,13 +221,17 @@ def train(config: TrainConfig) -> None:
             val_recon = val_recon_sum / max(1, val_batches)
             val_kl = val_kl_sum / max(1, val_batches)
 
+            checkpoint_config = asdict(config)
+            checkpoint_config["use_vision"] = False
+            checkpoint_config["norm_mode"] = "min_max"
+
             checkpoint = {
                 "model_state_dict": model.state_dict(),
-                "state_mean": bundle.state_mean.astype(np.float32),
-                "state_std": bundle.state_std.astype(np.float32),
-                "action_mean": bundle.action_mean.astype(np.float32),
-                "action_std": bundle.action_std.astype(np.float32),
-                "config": asdict(config),
+                "state_min": bundle.state_min.astype(np.float32),
+                "state_max": bundle.state_max.astype(np.float32),
+                "action_min": bundle.action_min.astype(np.float32),
+                "action_max": bundle.action_max.astype(np.float32),
+                "config": checkpoint_config,
                 "epoch": epoch,
                 "train_loss": train_loss,
                 "train_recon": train_recon,
@@ -308,10 +283,10 @@ def train(config: TrainConfig) -> None:
 
     np.savez(
         os.path.join(config.output_dir, "normalization_stats.npz"),
-        state_mean=bundle.state_mean.astype(np.float32),
-        state_std=bundle.state_std.astype(np.float32),
-        action_mean=bundle.action_mean.astype(np.float32),
-        action_std=bundle.action_std.astype(np.float32),
+        state_min=bundle.state_min.astype(np.float32),
+        state_max=bundle.state_max.astype(np.float32),
+        action_min=bundle.action_min.astype(np.float32),
+        action_max=bundle.action_max.astype(np.float32),
     )
 
     print(f"Saved ACT artifacts to: {config.output_dir}")
@@ -320,8 +295,8 @@ def train(config: TrainConfig) -> None:
 
 def parse_args() -> TrainConfig:
     defaults = TrainConfig()
-    parser = argparse.ArgumentParser(description="Train ACT on local Push-T zarr buffer")
-    parser.add_argument("--zarr_path", type=str, default=defaults.zarr_path)
+    parser = argparse.ArgumentParser(description="Train ACT on lerobot/pusht_keypoints (state-only)")
+    parser.add_argument("--dataset_id", type=str, default=defaults.dataset_id)
     parser.add_argument("--output_dir", type=str, default=defaults.output_dir)
     parser.add_argument("--seed", type=int, default=defaults.seed)
     parser.add_argument("--val_ratio", type=float, default=defaults.val_ratio)
@@ -338,7 +313,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--num_encoder_layers", type=int, default=defaults.num_encoder_layers)
     parser.add_argument("--num_decoder_layers", type=int, default=defaults.num_decoder_layers)
     parser.add_argument("--kl_beta", type=float, default=defaults.kl_beta)
-    parser.add_argument("--image_shift_px", type=int, default=defaults.image_shift_px)
+    parser.add_argument("--ensemble_decay", type=float, default=defaults.ensemble_decay)
     parser.add_argument("--num_workers", type=int, default=defaults.num_workers)
     parser.add_argument("--wandb", action="store_true", default=defaults.wandb)
     parser.add_argument("--wandb_project", type=str, default=defaults.wandb_project)
