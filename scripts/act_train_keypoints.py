@@ -9,8 +9,8 @@ boundary it is split into the LeRobot two-key observation dict
 to match ``input_shapes`` in the LeRobot ACT config.
 
 Example:
-    python scripts/act_train_keypoints.py --output_dir models/act_keypoints \\
-        --wandb --wandb_project introML-proj-graphs \\
+    python scripts/act_train_keypoints.py --output_dir models/act_keypoints \
+        --wandb --wandb_project introML-proj-graphs \
         --wandb_entity yizhoul2-carnegie-mellon-university
 """
 import argparse
@@ -86,9 +86,9 @@ class TrainConfig:
     val_ratio: float = 0.1
     epochs: int = 250
     batch_size: int = 64
-    learning_rate: float = 1e-4
-    weight_decay: float = 1e-5
-    num_workers: int = 0
+    learning_rate: float = 3e-5
+    weight_decay: float = 1e-4
+    num_workers: int = 4
     # The LeRobot ACT config dict (any subset of ACTLeRobotConfig fields).
     # CLI flags below allow overriding common scalar fields.
     lerobot_cfg: Dict = field(default_factory=lambda: dict(DEFAULT_LEROBOT_CFG))

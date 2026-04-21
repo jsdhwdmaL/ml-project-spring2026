@@ -81,16 +81,16 @@ class FinetuneConfig:
     keep_only_human: bool = False
     seed: int = 42
     val_ratio: float = 0.1
-    epochs: int = 30
+    epochs: int = 250
     batch_size: int = 64
-    learning_rate: float = 1e-5
+    learning_rate: float = 3e-5
     weight_decay: float = 1e-4
     # kl_weight: if None, inherit lerobot_cfg.kl_weight from the base checkpoint.
     # kl_warmup/ramp scale the (resolved) kl_weight over training.
     kl_weight: float | None = None
     kl_warmup_epochs: int = 0
     kl_ramp_epochs: int = 0
-    num_workers: int = 0
+    num_workers: int = 4
     wandb: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
