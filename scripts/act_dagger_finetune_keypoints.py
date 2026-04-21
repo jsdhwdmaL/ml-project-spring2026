@@ -17,13 +17,13 @@ Each contiguous human run becomes its own pseudo-episode for chunking, so
 action chunks never include policy-generated steps.
 
 Examples:
-    python scripts/act_dagger_finetune_keypoints.py \\
-        --model_path models/act_keypoints/best.pt \\
-        --data_dir   data/act_dagger_keypoints \\
+    python scripts/act_dagger_finetune_keypoints.py \
+        --model_path models/act_keypoints/best.pt \
+        --data_dir   data/act_dagger_keypoints \
         --output_dir models/act_dagger_keypoints
 
-    python scripts/act_dagger_finetune_keypoints.py \\
-        --keep_only_human --no_include_original_data \\
+    python scripts/act_dagger_finetune_keypoints.py \
+        --keep_only_human --no_include_original_data \
         --no_include_rejection_sample --no_include_failed_autonomous
 """
 
