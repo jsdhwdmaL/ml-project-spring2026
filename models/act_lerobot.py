@@ -1,6 +1,6 @@
 """Config-driven ACT policy aligned with LeRobot's ACT implementation.
 
-This module mirrors :class:`models.act.ACTPolicy` but exposes every knob in
+This module refactors :class:`models.act.ACTPolicy` but exposes every knob in
 LeRobot's ``ACTConfig`` so a checkpoint produced from the LeRobot trainer
 can be reproduced architecturally.
 

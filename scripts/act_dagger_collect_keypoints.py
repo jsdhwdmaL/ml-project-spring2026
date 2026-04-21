@@ -38,13 +38,16 @@ from envs.interactive_utils import (
 )
 from data.trajectory_recorder import TrajectoryRecorder
 from data.episode_saver import EpisodeSaver
-from models.act import ACTPolicy
+from models.act_lerobot import ACTLeRobotConfig, ACTLeRobotPolicy
+
+AGENT_POS_DIM = 2
+ENV_STATE_DIM = 16
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/act_keypoints_100_epochs/best.pt", "Path to pretrained 18-D keypoints ACT checkpoint")
+flags.DEFINE_string("model_path", "models/act_dagger1_keypoints_30/latest.pt", "Path to pretrained 18-D keypoints ACT checkpoint")
 flags.DEFINE_string("output_dir", "data/act_dagger_keypoints", "Directory to save collected data")
-flags.DEFINE_integer("num_seeds", 30, "Number of seeds to collect")
+flags.DEFINE_integer("num_seeds", 50, "Number of seeds to collect")
 flags.DEFINE_integer("fps", 10, "Control frequency")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor")
 flags.DEFINE_integer("max_steps", 300, "Max steps per episode")
@@ -100,8 +103,16 @@ def ensemble_current_action(
     return np.sum(stacked * w[:, None], axis=0)
 
 
+def split_state_to_obs(state: torch.Tensor) -> dict:
+    """Split the 18-D normalized state into the dict ACTLeRobotPolicy expects."""
+    return {
+        "observation.state": state[..., :AGENT_POS_DIM],
+        "observation.environment_state": state[..., AGENT_POS_DIM:],
+    }
+
+
 def predict_chunk(
-    model: ACTPolicy,
+    model: ACTLeRobotPolicy,
     state_vec: np.ndarray,
     state_min: torch.Tensor,
     state_max: torch.Tensor,
@@ -113,7 +124,7 @@ def predict_chunk(
     state_tensor = torch.tensor(state_vec, dtype=torch.float32, device=device).unsqueeze(0)
     state_norm = 2.0 * (state_tensor - state_min) / (state_max - state_min) - 1.0
     with torch.no_grad():
-        pred_norm, _, _ = model(None, state_norm, action_chunk=None)
+        pred_norm, _, _ = model(split_state_to_obs(state_norm), action_chunk=None)
     pred = (pred_norm + 1.0) * 0.5 * (
         action_max.view(1, 1, -1) - action_min.view(1, 1, -1)
     ) + action_min.view(1, 1, -1)
@@ -272,12 +283,17 @@ def main(_):
                 f"checkpoints saved by scripts/act_train_keypoints.py."
             )
 
-    horizon = int(config.get("horizon", 16))
-    hidden_dim = int(config.get("hidden_dim", 512))
-    latent_dim = int(config.get("latent_dim", 32))
-    nhead = int(config.get("nhead", 8))
-    num_encoder_layers = int(config.get("num_encoder_layers", 4))
-    num_decoder_layers = int(config.get("num_decoder_layers", 4))
+    lerobot_cfg_dict = checkpoint.get("lerobot_cfg")
+    if lerobot_cfg_dict is None:
+        lerobot_cfg_dict = config.get("lerobot_cfg")
+    if lerobot_cfg_dict is None:
+        raise KeyError(
+            "Checkpoint missing 'lerobot_cfg'. This script only loads ACTLeRobotPolicy "
+            "checkpoints saved by the updated scripts/act_train_keypoints.py "
+            "(or scripts/act_dagger_finetune_keypoints.py)."
+        )
+
+    horizon = int(lerobot_cfg_dict.get("chunk_size", 16))
     ckpt_decay = float(config.get("ensemble_decay", 0.05))
     ensemble_decay = ckpt_decay if FLAGS.ensemble_decay < 0 else FLAGS.ensemble_decay
 
@@ -287,10 +303,10 @@ def main(_):
     action_max_np = np.asarray(checkpoint["action_max"], dtype=np.float32)
     state_dim = int(state_min_np.shape[0])
     action_dim = int(action_min_np.shape[0])
-    if state_dim != 18:
+    if state_dim != AGENT_POS_DIM + ENV_STATE_DIM:
         raise ValueError(
-            f"This script targets the LeRobot pusht_keypoints ACT model (state_dim=18), "
-            f"but checkpoint has state_dim={state_dim}."
+            f"This script targets the LeRobot pusht_keypoints ACT model "
+            f"(state_dim={AGENT_POS_DIM + ENV_STATE_DIM}), but checkpoint has state_dim={state_dim}."
         )
 
     temporal_agg: bool = FLAGS.temporal_agg
@@ -301,17 +317,7 @@ def main(_):
     else:
         query_frequency = max(1, min(FLAGS.query_frequency, horizon))
 
-    model = ACTPolicy(
-        state_dim=state_dim,
-        action_dim=action_dim,
-        horizon=horizon,
-        hidden_dim=hidden_dim,
-        latent_dim=latent_dim,
-        nhead=nhead,
-        num_encoder_layers=num_encoder_layers,
-        num_decoder_layers=num_decoder_layers,
-        use_vision=False,
-    ).to(device)
+    model = ACTLeRobotPolicy(ACTLeRobotConfig.from_dict(lerobot_cfg_dict)).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
