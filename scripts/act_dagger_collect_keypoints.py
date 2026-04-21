@@ -42,9 +42,9 @@ from models.act import ACTPolicy
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/act_keypoints/best.pt", "Path to pretrained 18-D keypoints ACT checkpoint")
+flags.DEFINE_string("model_path", "models/act_keypoints_100_epochs/best.pt", "Path to pretrained 18-D keypoints ACT checkpoint")
 flags.DEFINE_string("output_dir", "data/act_dagger_keypoints", "Directory to save collected data")
-flags.DEFINE_integer("num_seeds", 10, "Number of seeds to collect")
+flags.DEFINE_integer("num_seeds", 30, "Number of seeds to collect")
 flags.DEFINE_integer("fps", 10, "Control frequency")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor")
 flags.DEFINE_integer("max_steps", 300, "Max steps per episode")
@@ -53,7 +53,7 @@ flags.DEFINE_integer("start_seed", 0, "Starting seed for deterministic sequences
 flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using start_seed sequence")
 flags.DEFINE_boolean("save_images", False, "Save image observations (default off; keypoints model is state-only)")
 flags.DEFINE_boolean("temporal_agg", True, "Enable temporal ensembling (query model every step, blend predictions)")
-flags.DEFINE_float("ensemble_decay", 0.01, "Override temporal ensembling decay; <0 uses checkpoint")
+flags.DEFINE_float("ensemble_decay", 0.05, "Override temporal ensembling decay; <0 uses checkpoint")
 flags.DEFINE_integer(
     "query_frequency",
     -1,
@@ -62,7 +62,7 @@ flags.DEFINE_integer(
 )
 flags.DEFINE_float(
     "success_threshold",
-    0.9,
+    0.95,
     "Coverage fraction in (0, 1] required to count as success. "
     "Note: gym_pusht auto-terminates at 0.95, so values >0.95 are clamped to 0.95.",
 )
