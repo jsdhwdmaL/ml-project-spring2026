@@ -19,6 +19,8 @@ import torchvision.transforms as T
 import gymnasium as gym
 import pygame
 from absl import app, flags
+import imageio
+import time
 
 import gym_pusht  # registers environment
 from envs.interactive_utils import get_observation_image, draw_status_overlay, ControlState
@@ -32,6 +34,8 @@ flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz (Must match training data!)")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
+flags.DEFINE_boolean("save_video", True, "Save episodes as an MP4 video")
+flags.DEFINE_string("video_dir", "videos/bc_mlp", "Directory to save episode videos")
 
 
 def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
@@ -40,6 +44,14 @@ def get_agent_pos_from_obs(obs: Dict) -> np.ndarray:
     if agent_pos.ndim == 1:
         return agent_pos
     return agent_pos[-1]
+
+
+def capture_frame(env) -> Optional[np.ndarray]:
+    """Grab the current pygame window surface as an RGB numpy array."""
+    surface = pygame.display.get_surface()
+    if surface is None:
+        return None
+    return np.transpose(pygame.surfarray.array3d(surface), (1, 0, 2))  # (H, W, 3)
 
 
 def main(_):
@@ -87,6 +99,7 @@ def main(_):
     success_count = 0
 
     seeds = np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist() if FLAGS.random_seeds else range(FLAGS.num_seeds)
+    frames = []
     for seed in seeds:
         obs, _ = env.reset(seed=seed)
         
@@ -189,6 +202,11 @@ def main(_):
                 agent_pos, 
                 False
             )
+
+            if FLAGS.save_video:
+                frame = capture_frame(env)
+                if frame is not None:
+                    frames.append(frame)
                 
             clock.tick(FLAGS.fps)
 
@@ -197,6 +215,11 @@ def main(_):
             print(f"Episode {seed + 1}/{FLAGS.num_seeds} - SUCCESS (Took {step} steps)")
         else:
             print(f"Episode {seed + 1}/{FLAGS.num_seeds} - FAILED (Reached {step} steps)")
+
+        # pause for 1 second on final state
+        if FLAGS.save_video:
+            for j in range(FLAGS.fps):
+                frames.append(frames[-1])
 
         if action_count > 0:
             clip_rate = 100.0 * clipped_count / action_count
@@ -211,6 +234,13 @@ def main(_):
     print("=" * 60)
     print(f"Evaluation Complete! Success Rate: {success_count}/{FLAGS.num_seeds} ({(success_count/FLAGS.num_seeds)*100:.1f}%)")
     print("=" * 60)
+
+    if FLAGS.save_video and frames:
+        os.makedirs(FLAGS.video_dir, exist_ok=True)  # auto-create dir
+        video_path = os.path.join(FLAGS.video_dir, time.strftime("%Y-%m-%d-%H-%M-%S.mp4"))
+        imageio.mimwrite(video_path, frames, fps=FLAGS.fps)
+        print(f"Saved video to {video_path}")
+
     env.close()
 
 if __name__ == "__main__":

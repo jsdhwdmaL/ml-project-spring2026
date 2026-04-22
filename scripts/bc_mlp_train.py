@@ -32,6 +32,8 @@ if REPO_ROOT not in sys.path:
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from models.bc_mlp import BehavioralCloningPolicy
 
+from tqdm import tqdm
+
 try:
     import wandb
 except ImportError:
@@ -208,7 +210,7 @@ def train(config: TrainConfig) -> None:
             # --- TRAIN ---
             model.train()
             t_loss = 0.0
-            for batch in train_loader:
+            for batch in tqdm(train_loader):
                 images = preprocess_image_batch(batch["observation.image"].to(device), transform_fn)
                 states = batch["observation.state"].to(device, dtype=torch.float32)
                 actions = batch["action"].to(device, dtype=torch.float32)
@@ -230,7 +232,7 @@ def train(config: TrainConfig) -> None:
             model.eval()
             v_loss = 0.0
             with torch.no_grad():
-                for batch in val_loader:
+                for batch in tqdm(val_loader):
                     images = preprocess_image_batch(batch["observation.image"].to(device), transform_fn)
                     states = batch["observation.state"].to(device, dtype=torch.float32)
                     actions = batch["action"].to(device, dtype=torch.float32)
