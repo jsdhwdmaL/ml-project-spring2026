@@ -1,17 +1,27 @@
 import pygame
 import numpy as np
 from enum import Enum
+from typing import Optional
 
 class ControlState(Enum):
     PAUSED = "PAUSED"
     HUMAN_CONTROL = "HUMAN_CONTROL"
     MODEL_CONTROL = "MODEL_CONTROL"  # Added for inference
+    BLENDED_INTERVENTION = "BLENDED_INTERVENTION"  # CR-DAgger style soft correction
 
 class InterventionController:
-    def __init__(self, activation_radius=30.0, window_scale=1.0):
+    def __init__(
+        self,
+        activation_radius=30.0,
+        window_scale=1.0,
+        blend_lambda: Optional[float] = None,
+    ):
         self.activation_radius = activation_radius
         self.window_scale = window_scale
         self.state = ControlState.PAUSED
+        # blend_lambda is None -> original overwrite-only behavior (backwards compatible).
+        # When set, callers may use try_activate_blended_control / get_blended_action.
+        self.blend_lambda = blend_lambda
 
     def reset(self):
         self.state = ControlState.PAUSED
@@ -45,6 +55,49 @@ class InterventionController:
         env_y = mouse_pos[1] / self.window_scale
         
         return np.array([env_x, env_y], dtype=np.float32)
+
+    # ---------- CR-DAgger blended-intervention API ----------
+
+    def is_blend_engaged(self) -> bool:
+        """True iff the human is engaging blended intervention this step.
+
+        Engagement is "either SHIFT key held". Only meaningful when
+        blend_lambda is not None.
+        """
+        if self.blend_lambda is None:
+            return False
+        keys = pygame.key.get_pressed()
+        return bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
+
+    def try_activate_blended_control(self) -> None:
+        """Switch to BLENDED_INTERVENTION while SHIFT is held; otherwise
+        fall back to MODEL_CONTROL (released)."""
+        if self.blend_lambda is None:
+            return
+        if self.is_blend_engaged():
+            self.state = ControlState.BLENDED_INTERVENTION
+        else:
+            self.state = ControlState.MODEL_CONTROL
+
+    def get_blended_action(self, a_base: np.ndarray) -> np.ndarray:
+        """Return (1 - lambda) * a_base + lambda * mouse_target, clipped to [0, 512].
+
+        a_base is the base policy's intended action for this step (2-D).
+        """
+        if self.blend_lambda is None:
+            raise RuntimeError(
+                "get_blended_action called but blend_lambda is None; "
+                "construct InterventionController with blend_lambda=<float>."
+            )
+        lam = float(self.blend_lambda)
+        mouse_pos = pygame.mouse.get_pos()
+        a_human = np.array(
+            [mouse_pos[0] / self.window_scale, mouse_pos[1] / self.window_scale],
+            dtype=np.float32,
+        )
+        a_base = np.asarray(a_base, dtype=np.float32).reshape(-1)
+        blended = (1.0 - lam) * a_base + lam * a_human
+        return np.clip(blended, 0.0, 512.0).astype(np.float32)
 
 def get_observation_image(env):
     """Grabs the RGB frame directly from the active pygame surface."""
@@ -82,6 +135,8 @@ def draw_status_overlay(
         color = (200, 0, 0)
     elif state == ControlState.MODEL_CONTROL:
         color = (0, 0, 200)
+    elif state == ControlState.BLENDED_INTERVENTION:
+        color = (160, 0, 200)  # purple = blended (mix of red human + blue model)
 
     text = f"Seed: {env_seed} | Step: {step}/{max_steps} | {state.value}"
     text_surface = font.render(text, True, color)

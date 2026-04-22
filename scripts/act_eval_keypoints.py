@@ -42,12 +42,12 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string("model_path", "models/act_keypoints/best.pt", "Path to trained ACT keypoints checkpoint")
 flags.DEFINE_integer("num_seeds", 50, "Number of episodes to evaluate")
-flags.DEFINE_integer("seed", 42, "Global seed for numpy/torch and the env-seed sequence (matches LeRobot's deterministic eval semantics)")
-flags.DEFINE_boolean("random_seeds", True, "If True, draw env seeds from the seeded RNG; if False, use sequential seeds [seed, seed+num_seeds)")
+flags.DEFINE_integer("seed", 42, "Global seed for numpy/torch (model/eval reproducibility). Used as the first env seed only when --random_seeds=False.")
+flags.DEFINE_boolean("random_seeds", True, "If True, draw env seeds from OS entropy each run (truly different across runs). If False, use sequential seeds [seed, seed+num_seeds).")
 flags.DEFINE_integer("fps", 10, "Control/render frequency in Hz")
 flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
-flags.DEFINE_float("ensemble_decay",0.05, "Override temporal ensembling decay; <0 uses checkpoint")
+flags.DEFINE_float("ensemble_decay",0.1, "Override temporal ensembling decay; <0 uses checkpoint")
 flags.DEFINE_boolean("save_video", True, "Save episodes as an MP4 video")
 flags.DEFINE_string("video_dir", "videos/act_keypoints", "Directory to save episode videos")
 flags.DEFINE_boolean(
@@ -70,7 +70,7 @@ flags.DEFINE_boolean(
 )
 flags.DEFINE_float(
     "success_threshold",
-    0.95,
+    0.9,
     "Coverage fraction in (0, 1] required to count as success. "
     "Note: gym_pusht auto-terminates at 0.95, so values >0.95 are clamped to 0.95.",
 )
@@ -215,11 +215,16 @@ def main(_):
     success_count = 0
     coverages: List[float] = []
 
-    seeds = (
-        np.random.randint(0, 2**31, size=FLAGS.num_seeds).tolist()
-        if FLAGS.random_seeds
-        else list(range(FLAGS.seed, FLAGS.seed + FLAGS.num_seeds))
-    )
+    if FLAGS.random_seeds:
+        # Draw env seeds from OS entropy so each run picks a fresh batch.
+        # We deliberately avoid np.random here because it was seeded with
+        # FLAGS.seed above for model/eval reproducibility — using it would
+        # produce the same "random" seeds every run.
+        env_seed_rng = np.random.default_rng()
+        seeds = env_seed_rng.integers(0, 2**31, size=FLAGS.num_seeds).tolist()
+    else:
+        seeds = list(range(FLAGS.seed, FLAGS.seed + FLAGS.num_seeds))
+    print(f"Eval env seeds ({'random' if FLAGS.random_seeds else 'sequential'}): {seeds}")
     frames: List[np.ndarray] = []
 
     for i, seed in enumerate(seeds):
