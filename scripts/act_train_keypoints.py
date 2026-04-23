@@ -12,6 +12,10 @@ Example:
     python scripts/act_train_keypoints.py --output_dir models/act_keypoints \
         --wandb --wandb_project introML-proj-graphs \
         --wandb_entity yizhoul2-carnegie-mellon-university
+
+KL annealing (optional): use ``--kl_warmup_epochs`` to train with 0 KL weight first, and
+``--kl_ramp_epochs`` to linearly increase from 0 to ``--kl_weight`` afterward (same
+semantics as ``scripts/act_dagger_finetune_keypoints.py``).
 """
 import argparse
 import json
@@ -95,6 +99,21 @@ class TrainConfig:
     wandb: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
+    # KL schedule: `lerobot_cfg["kl_weight"]` is the target; effective weight is 0 for
+    # the first `kl_warmup_epochs`, then linearly ramped over `kl_ramp_epochs` (0 = jump to full).
+    kl_warmup_epochs: int = 0
+    kl_ramp_epochs: int = 0
+
+
+def get_kl_weight(epoch_index: int, base_kl_weight: float, config: TrainConfig) -> float:
+    if epoch_index < config.kl_warmup_epochs:
+        return 0.0
+    if config.kl_ramp_epochs <= 0:
+        return float(base_kl_weight)
+    ramp_step = epoch_index - config.kl_warmup_epochs + 1
+    if ramp_step <= config.kl_ramp_epochs:
+        return float(base_kl_weight) * (ramp_step / float(config.kl_ramp_epochs))
+    return float(base_kl_weight)
 
 
 def split_state_to_obs(state: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -118,7 +137,7 @@ def train(config: TrainConfig) -> None:
 
     lerobot_cfg = ACTLeRobotConfig.from_dict(config.lerobot_cfg)
     horizon = int(lerobot_cfg.chunk_size)
-    kl_weight = float(lerobot_cfg.kl_weight)
+    base_kl_weight = float(lerobot_cfg.kl_weight)
 
     # Sanity-check the input/output shapes match the keypoints data layout.
     expected_input_shapes = {
@@ -190,7 +209,7 @@ def train(config: TrainConfig) -> None:
 
     best_val = float("inf")
 
-    def _step(batch, train_mode: bool):
+    def _step(batch, train_mode: bool, kl_w: float):
         states_b = batch["state"].to(device)
         action_chunk = batch["action_chunk"].to(device)
         action_is_pad_b = batch["action_is_pad"].to(device)
@@ -209,17 +228,19 @@ def train(config: TrainConfig) -> None:
             kl_loss = ACTLeRobotPolicy.kl_divergence(mu, logvar)
         else:
             kl_loss = torch.zeros((), device=device)
-        loss = recon_loss + kl_weight * kl_loss
+        loss = recon_loss + float(kl_w) * kl_loss
         return loss, recon_loss, kl_loss
 
     try:
         for epoch in range(1, config.epochs + 1):
+            epoch_kl_weight = get_kl_weight(epoch - 1, base_kl_weight, config)
+
             model.train()
             train_loss_sum = train_recon_sum = train_kl_sum = 0.0
             train_batches = 0
 
             for batch in tqdm(bundle.train_loader, desc=f"Train {epoch}/{config.epochs}", leave=False):
-                loss, recon_loss, kl_loss = _step(batch, train_mode=True)
+                loss, recon_loss, kl_loss = _step(batch, train_mode=True, kl_w=epoch_kl_weight)
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -240,7 +261,7 @@ def train(config: TrainConfig) -> None:
             val_batches = 0
             with torch.no_grad():
                 for batch in tqdm(bundle.val_loader, desc=f"Val {epoch}/{config.epochs}", leave=False):
-                    loss, recon_loss, kl_loss = _step(batch, train_mode=False)
+                    loss, recon_loss, kl_loss = _step(batch, train_mode=False, kl_w=epoch_kl_weight)
                     val_loss_sum += float(loss.item())
                     val_recon_sum += float(recon_loss.item())
                     val_kl_sum += float(kl_loss.item())
@@ -286,7 +307,8 @@ def train(config: TrainConfig) -> None:
             print(
                 f"Epoch {epoch:03d}/{config.epochs} | "
                 f"train={train_loss:.6f} (recon={train_recon:.6f}, kl={train_kl:.6f}) | "
-                f"val={val_loss:.6f} (recon={val_recon:.6f}, kl={val_kl:.6f})"
+                f"val={val_loss:.6f} (recon={val_recon:.6f}, kl={val_kl:.6f}) | "
+                f"kl_w={epoch_kl_weight:.6f}"
             )
             if wandb_run is not None:
                 wandb.log(
@@ -298,7 +320,7 @@ def train(config: TrainConfig) -> None:
                         "train/kl_loss": float(train_kl),
                         "val/recon_loss": float(val_recon),
                         "val/kl_loss": float(val_kl),
-                        "train/kl_weight": float(kl_weight),
+                        "train/kl_weight": float(epoch_kl_weight),
                     },
                     step=epoch,
                 )
@@ -338,6 +360,18 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--learning_rate", type=float, default=defaults.learning_rate)
     parser.add_argument("--weight_decay", type=float, default=defaults.weight_decay)
     parser.add_argument("--num_workers", type=int, default=defaults.num_workers)
+    parser.add_argument(
+        "--kl_warmup_epochs",
+        type=int,
+        default=defaults.kl_warmup_epochs,
+        help="Use KL weight 0 for this many epochs (0 = disabled).",
+    )
+    parser.add_argument(
+        "--kl_ramp_epochs",
+        type=int,
+        default=defaults.kl_ramp_epochs,
+        help="After warmup, scale KL from 0 to --kl_weight linearly over this many epochs (0 = no ramp).",
+    )
 
     # Optional path to a JSON file with a (partial) LeRobot ACT config dict.
     parser.add_argument(
@@ -420,6 +454,8 @@ def parse_args() -> TrainConfig:
         wandb=args.wandb,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
+        kl_warmup_epochs=args.kl_warmup_epochs,
+        kl_ramp_epochs=args.kl_ramp_epochs,
     )
 
 

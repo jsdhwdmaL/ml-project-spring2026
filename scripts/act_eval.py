@@ -34,6 +34,11 @@ flags.DEFINE_float("window_scale", 1.0, "Window scale factor (>= 1.0)")
 flags.DEFINE_integer("max_steps", 300, "Maximum steps per episode")
 flags.DEFINE_float("ensemble_decay", 0.01, "Override temporal ensembling decay; <0 uses checkpoint")
 flags.DEFINE_boolean("save_video", True, "Save episodes as an MP4 video")
+flags.DEFINE_boolean(
+    "defer_video",
+    False,
+    "With --save_video, run all num_seeds rollouts first without recording, then one MP4 from replaying stored actions.",
+)
 flags.DEFINE_string("video_dir", "videos/act", "Directory to save episode videos")
 flags.DEFINE_boolean("temporal_agg", True, "Enable temporal ensembling (query model every step, blend predictions)")
 flags.DEFINE_integer("query_frequency", 1, "When temporal_agg is disabled, how many steps to execute from each predicted chunk before re-querying")
@@ -103,6 +108,72 @@ def save_episode_video(frames: List[np.ndarray], path: str, fps: int) -> None:
     if not frames:
         return
     print(f"Saved video to {path}")
+
+
+def replay_act_traces_to_frames(
+    traces: List[Tuple[int, List[np.ndarray]]],
+    *,
+    fast_mode: bool,
+    window_size: int,
+    max_steps: int,
+    fps: int,
+    obs_type: str,
+) -> List[np.ndarray]:
+    """Replay stored (seed, action list) in PushT; capture frames like main eval (overlay when not fast)."""
+    render_mode = "rgb_array" if fast_mode else "human"
+    env = gym.make(
+        "gym_pusht/PushT-v0",
+        obs_type=obs_type,
+        render_mode=render_mode,
+        visualization_width=window_size,
+        visualization_height=window_size,
+    )
+    env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)
+    clock = None if fast_mode else pygame.time.Clock()
+    frames: List[np.ndarray] = []
+    for seed, actions in traces:
+        if not actions:
+            continue
+        obs, _ = env.reset(seed=int(seed))
+        for step, action in enumerate(actions, start=1):
+            if not fast_mode:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT or (
+                        event.type == pygame.KEYDOWN and event.key == pygame.K_q
+                    ):
+                        env.close()
+                        return frames
+            agent_pos = get_agent_pos_from_obs(obs)
+            obs, reward, terminated, truncated, info = env.step(
+                np.clip(np.asarray(action, dtype=np.float32), 0.0, 512.0)
+            )
+            if fast_mode:
+                latest_render = env.render()
+                if latest_render is not None:
+                    frames.append(np.asarray(latest_render))
+            else:
+                env.render()
+                draw_status_overlay(
+                    env,
+                    ControlState.MODEL_CONTROL,
+                    int(seed),
+                    0,
+                    step,
+                    max_steps,
+                    agent_pos,
+                    False,
+                    reward=float(reward),
+                )
+                frame = capture_frame(env)
+                if frame is not None:
+                    frames.append(frame)
+                if clock is not None:
+                    clock.tick(fps)
+        if frames:
+            for _ in range(fps):
+                frames.append(frames[-1])
+    env.close()
+    return frames
 
 
 def normalize_state_dict_keys_for_eval(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -188,11 +259,12 @@ def main(_):
     window_size = int(512 * FLAGS.window_scale)
     obs_type = "environment_state_agent_pos" if use_vision else "state"
     fast_mode = bool(FLAGS.on_cuda)
-    render_mode = "rgb_array" if fast_mode else "human"
+    use_defer = bool(FLAGS.save_video and FLAGS.defer_video)
+    pass1_render_mode = "rgb_array" if (fast_mode or use_defer) else "human"
     env = gym.make(
         "gym_pusht/PushT-v0",
         obs_type=obs_type,
-        render_mode=render_mode,
+        render_mode=pass1_render_mode,
         visualization_width=window_size,
         visualization_height=window_size,
     )
@@ -202,6 +274,7 @@ def main(_):
     print(
         f"H={horizon} | ensemble_decay={ensemble_decay} | use_vision={use_vision} | "
         f"state_dim={state_dim} | fast_mode={fast_mode}"
+        f"{' | defer_video=ON' if use_defer else ''}"
     )
     if FLAGS.num_seeds < 20:
         print(
@@ -219,7 +292,8 @@ def main(_):
         if FLAGS.random_seeds
         else list(range(FLAGS.seed, FLAGS.seed + FLAGS.num_seeds))
     )
-    frames: List[np.ndarray] = [] # for video export
+    frames: List[np.ndarray] = []  # for video export
+    traces: List[Tuple[int, List[np.ndarray]]] = []
 
     for i, seed in enumerate(seeds):
         obs, _ = env.reset(seed=int(seed))
@@ -230,8 +304,9 @@ def main(_):
         max_coverage = 0.0
         max_reward = 0.0
         sum_reward = 0.0
-        clock = pygame.time.Clock() if not fast_mode else None
-        latest_render = env.render() if fast_mode else None
+        clock = pygame.time.Clock() if (not fast_mode and not use_defer) else None
+        latest_render = env.render() if (fast_mode and not use_defer) else None
+        ep_actions: List[np.ndarray] = []
 
         # --------------- temporal ensembling state ---------------
         # all_time_actions[t_query, t_exec] stores the action predicted
@@ -249,7 +324,7 @@ def main(_):
         cached_chunk: Optional[np.ndarray] = None
 
         while not (terminated or truncated):
-            if not fast_mode:
+            if not fast_mode and not use_defer:
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_q):
                         print("Evaluation aborted by user.")
@@ -311,6 +386,8 @@ def main(_):
                 action_np = cached_chunk[offset].astype(np.float32)
 
             action = np.clip(action_np, 0.0, 512.0)
+            if use_defer:
+                ep_actions.append(action.copy())
 
             obs, reward, terminated, truncated, info = env.step(action)
             reward_f = float(reward)
@@ -328,30 +405,32 @@ def main(_):
             if step >= FLAGS.max_steps:
                 truncated = True
 
-            if fast_mode:
-                latest_render = env.render()
-                if FLAGS.save_video and latest_render is not None:
-                    frames.append(np.asarray(latest_render))
-            else:
-                env.render()
-                draw_status_overlay(
-                    env,
-                    ControlState.MODEL_CONTROL,
-                    int(seed),
-                    0,
-                    step,
-                    FLAGS.max_steps,
-                    agent_pos,
-                    False,
-                    reward=float(reward),
-                )
+            if not use_defer:
+                if fast_mode:
+                    latest_render = env.render()
+                    if FLAGS.save_video and latest_render is not None:
+                        frames.append(np.asarray(latest_render))
+                else:
+                    env.render()
+                    draw_status_overlay(
+                        env,
+                        ControlState.MODEL_CONTROL,
+                        int(seed),
+                        0,
+                        step,
+                        FLAGS.max_steps,
+                        agent_pos,
+                        False,
+                        reward=float(reward),
+                    )
 
-                if FLAGS.save_video:
-                    frame = capture_frame(env)
-                    if frame is not None:
-                        frames.append(frame)
+                    if FLAGS.save_video:
+                        frame = capture_frame(env)
+                        if frame is not None:
+                            frames.append(frame)
 
-                clock.tick(FLAGS.fps)
+                    if clock is not None:
+                        clock.tick(FLAGS.fps)
 
         if success:
             success_count += 1
@@ -367,8 +446,10 @@ def main(_):
             f"sum_reward={sum_reward:.2f}, threshold={success_thresh:.2f})"
         )
 
+        if use_defer:
+            traces.append((int(seed), ep_actions))
         # pause for 1 second on final state
-        if FLAGS.save_video and frames:
+        if FLAGS.save_video and (not use_defer) and frames:
             for j in range(FLAGS.fps):
                 frames.append(frames[-1])
 
@@ -385,13 +466,30 @@ def main(_):
     )
     print("=" * 60)
 
-    if FLAGS.save_video and frames:
+    if use_defer and FLAGS.save_video and traces:
+        env.close()
+        print("Replaying action traces for video encoding...")
+        frames = replay_act_traces_to_frames(
+            traces,
+            fast_mode=fast_mode,
+            window_size=window_size,
+            max_steps=FLAGS.max_steps,
+            fps=FLAGS.fps,
+            obs_type=obs_type,
+        )
+        if frames:
+            os.makedirs(FLAGS.video_dir, exist_ok=True)  # auto-create dir
+            video_path = os.path.join(FLAGS.video_dir, time.strftime("%Y-%m-%d-%H-%M-%S.mp4"))
+            imageio.mimwrite(video_path, frames, fps=FLAGS.fps)
+            print(f"Saved video to {video_path}")
+    elif FLAGS.save_video and frames:
         os.makedirs(FLAGS.video_dir, exist_ok=True)  # auto-create dir
         video_path = os.path.join(FLAGS.video_dir, time.strftime("%Y-%m-%d-%H-%M-%S.mp4"))
         imageio.mimwrite(video_path, frames, fps=FLAGS.fps)
         print(f"Saved video to {video_path}")
-
-    env.close()
+        env.close()
+    else:
+        env.close()
 
 
 if __name__ == "__main__":

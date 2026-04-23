@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pygame
 import numpy as np
 from enum import Enum
@@ -107,6 +109,41 @@ def get_observation_image(env):
         return np.transpose(image_array, (1, 0, 2))
     return np.zeros((512, 512, 3), dtype=np.uint8)
 
+def _draw_future_plan_on_pygame(
+    screen: pygame.surface.Surface,
+    future_plan_xy: np.ndarray,
+) -> None:
+    """Draw predicted action chunk (H,2) in env coordinates [0,512] on the PushT pygame surface."""
+    pts = np.asarray(future_plan_xy, dtype=np.float64).reshape(-1, 2)
+    if pts.shape[0] < 2:
+        return
+    xy = [tuple(p) for p in np.clip(pts, 0.0, 512.0)]
+    if len(xy) > 1:
+        pygame.draw.aalines(screen, (60, 220, 100), False, xy, blend=1)
+    for p in xy:
+        pygame.draw.circle(screen, (255, 200, 0), (int(p[0]), int(p[1])), 4, width=0)
+
+
+def draw_future_plan_on_rgb_frame(frame: np.ndarray, future_plan_xy: np.ndarray) -> np.ndarray:
+    """RGB uint8 (H,W,3) — draws chunk path + label; for headless / cv2 pipeline."""
+    import cv2
+
+    out = frame.copy()
+    bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+    pts = np.asarray(future_plan_xy, dtype=np.float32).reshape(-1, 2)
+    if pts.shape[0] < 1:
+        return out
+    pi = np.clip(pts, 0.0, 512.0).astype(np.int32)
+    if pi.shape[0] >= 2:
+        cv2.polylines(bgr, [pi], isClosed=False, color=(100, 220, 60), thickness=2, lineType=cv2.LINE_AA)
+    for x, y in pi:
+        cv2.circle(bgr, (int(x), int(y)), 4, (0, 200, 255), -1, lineType=cv2.LINE_AA)
+    cv2.putText(
+        bgr, "Future plan (ACT chunk)", (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 220, 60), 2, cv2.LINE_AA
+    )
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
 def draw_status_overlay(
     env,
     state,
@@ -117,11 +154,18 @@ def draw_status_overlay(
     agent_pos,
     is_pure_teleop,
     reward=None,
+    future_plan_xy: Optional[np.ndarray] = None,
 ):
-    """Draws tracking text overlay over the Push-T environment."""
+    """Draws tracking text overlay over the Push-T environment.
+
+    future_plan_xy: optional (H,2) model chunk in pixel space [0,512] to visualize as a future path.
+    """
     screen = pygame.display.get_surface()
     if screen is None:
         return
+
+    if future_plan_xy is not None:
+        _draw_future_plan_on_pygame(screen, future_plan_xy)
 
     # Use a default font that is likely to exist on Mac/Linux
     pygame.font.init()

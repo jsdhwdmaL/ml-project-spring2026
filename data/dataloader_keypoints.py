@@ -123,12 +123,19 @@ def build_keypoints_dataloaders(
     val_ratio: float = 0.1,
     seed: int = 42,
     num_workers: int = 0,
+    val_num_workers: int | None = None,
     pin_memory: bool = True,
 ) -> KeypointsDataBundle:
     """Build train/val DataLoaders for the LeRobot pusht_keypoints dataset.
 
     Returns a :class:`KeypointsDataBundle` containing the loaders and
     per-channel min/max stats computed on the train split only.
+
+    ``val_num_workers``: if set, overrides ``num_workers`` for the val loader only
+    (e.g. use 1 when train uses many workers but val is small).
+
+    When ``num_workers`` / val workers are ``> 0``, loaders use
+    ``persistent_workers=True`` so workers are reused across epochs.
     """
     # Local import so importing this module doesn't require lerobot installed.
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -164,19 +171,22 @@ def build_keypoints_dataloaders(
     train_ds = KeypointsStepDataset(states, action_chunks, action_is_pad, train_idx)
     val_ds = KeypointsStepDataset(states, action_chunks, action_is_pad, val_idx)
 
+    val_nw = num_workers if val_num_workers is None else val_num_workers
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=val_nw,
         pin_memory=pin_memory,
+        persistent_workers=val_nw > 0,
     )
 
     return KeypointsDataBundle(
