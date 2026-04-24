@@ -18,9 +18,9 @@ action chunks never include policy-generated steps.
 
 Examples:
     python scripts/act_dagger_finetune_keypoints.py \
-        --model_path models/act_keypoints_3200/latest.pt \
-        --data_dir   data/act_dagger_keypoints \
-        --output_dir models/act_dagger_keypoints \
+        --model_path models/act_keypoints_250_epochs/latest.pt \
+        --data_dir   data/act_cr_dagger_keypoints \
+        --output_dir models/act_cr_dagger_keypoints \
         --wandb --wandb_project introML-proj-graphs \
         --wandb_entity yizhoul2-carnegie-mellon-university
 """
@@ -49,7 +49,7 @@ from data.dataloader_keypoints import (
     build_keypoints_dataloaders,
     min_max_normalize,
 )
-from models.act_lerobot import ACTLeRobotConfig, ACTLeRobotPolicy
+from models.act_refactored import ACTLeRobotConfig, ACTLeRobotPolicy
 
 try:
     import wandb
@@ -79,7 +79,7 @@ class FinetuneConfig:
     keep_only_human: bool = True
     seed: int = 42
     val_ratio: float = 0.1
-    epochs: int = 150
+    epochs: int = 30
     batch_size: int = 64
     learning_rate: float = 3e-5
     weight_decay: float = 1e-4

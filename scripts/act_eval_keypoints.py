@@ -36,7 +36,7 @@ if REPO_ROOT not in sys.path:
 
 import gym_pusht  # noqa: F401  (registers gym_pusht/PushT-v0)
 from envs.interactive_utils import draw_future_plan_on_rgb_frame, draw_status_overlay, ControlState
-from models.act_lerobot import ACTLeRobotConfig, ACTLeRobotPolicy
+from models.act_refactored import ACTLeRobotConfig, ACTLeRobotPolicy
 
 AGENT_POS_DIM = 2
 ENV_STATE_DIM = 16

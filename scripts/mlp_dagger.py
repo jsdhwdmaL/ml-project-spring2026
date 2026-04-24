@@ -33,7 +33,7 @@ from envs.interactive_utils import (
 )
 from data.trajectory_recorder import TrajectoryRecorder
 from data.episode_saver import EpisodeSaver
-from models.bc_mlp import BehavioralCloningPolicy
+from models.mlp import BehavioralCloningPolicy
 
 FLAGS = flags.FLAGS
 

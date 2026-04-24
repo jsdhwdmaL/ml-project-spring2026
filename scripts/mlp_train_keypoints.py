@@ -28,7 +28,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from data.dataloader_keypoints import build_keypoints_dataloaders, min_max_normalize
-from models.bc_mlp_keypoints import BCKeypointsMLP, DEFAULT_STATE_DIM, DEFAULT_ACTION_DIM
+from models.mlp_keypoints import BCKeypointsMLP, DEFAULT_STATE_DIM, DEFAULT_ACTION_DIM
 
 try:
     import wandb

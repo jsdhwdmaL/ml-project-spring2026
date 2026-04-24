@@ -30,7 +30,7 @@ if REPO_ROOT not in sys.path:
 
 # Import LeRobotDataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from models.bc_mlp import BehavioralCloningPolicy
+from models.mlp import BehavioralCloningPolicy
 
 from tqdm import tqdm
 

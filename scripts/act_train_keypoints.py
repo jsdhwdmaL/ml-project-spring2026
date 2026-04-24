@@ -35,7 +35,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from data.dataloader_keypoints import build_keypoints_dataloaders, min_max_normalize
-from models.act_lerobot import ACTLeRobotConfig, ACTLeRobotPolicy
+from models.act_refactored import ACTLeRobotConfig, ACTLeRobotPolicy
 
 try:
     import wandb

@@ -29,7 +29,7 @@ if REPO_ROOT not in sys.path:
 import gym_pusht  # noqa: F401
 from data.dataloader_keypoints import min_max_denormalize, min_max_normalize
 from envs.interactive_utils import draw_status_overlay, ControlState
-from models.bc_mlp_keypoints import BCKeypointsMLP, DEFAULT_STATE_DIM, DEFAULT_ACTION_DIM
+from models.mlp_keypoints import BCKeypointsMLP, DEFAULT_STATE_DIM, DEFAULT_ACTION_DIM
 
 FLAGS = flags.FLAGS
 

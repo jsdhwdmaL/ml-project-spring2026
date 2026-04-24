@@ -45,7 +45,7 @@ from data.dataloader_keypoints import (
     min_max_normalize,
     split_episode_indices,
 )
-from models.bc_mlp_keypoints import BCKeypointsMLP, DEFAULT_STATE_DIM, DEFAULT_ACTION_DIM
+from models.mlp_keypoints import BCKeypointsMLP, DEFAULT_STATE_DIM, DEFAULT_ACTION_DIM
 
 try:
     import wandb

@@ -1,3 +1,7 @@
+"""The starting ACT model we used for initial experiments,
+then we refactored this file in act_refactored.py to support more
+hyperparameters, with the same ACT architecture."""
+
 import math
 import torch
 import torch.nn as nn

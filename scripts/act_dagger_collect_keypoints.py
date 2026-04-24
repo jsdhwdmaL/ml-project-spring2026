@@ -38,7 +38,7 @@ from envs.interactive_utils import (
 )
 from data.trajectory_recorder import TrajectoryRecorder
 from data.episode_saver import EpisodeSaver
-from models.act_lerobot import ACTLeRobotConfig, ACTLeRobotPolicy
+from models.act_refactored import ACTLeRobotConfig, ACTLeRobotPolicy
 
 AGENT_POS_DIM = 2
 ENV_STATE_DIM = 16

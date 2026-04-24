@@ -1,3 +1,5 @@
+"""Model for ResNet + two layer MLP for single-step MLP baseline method"""
+
 import torch
 import torch.nn as nn
 from torchvision import models

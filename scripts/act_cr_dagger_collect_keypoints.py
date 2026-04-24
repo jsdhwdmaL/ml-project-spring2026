@@ -58,14 +58,14 @@ from envs.interactive_utils import (
 )
 from data.trajectory_recorder import TrajectoryRecorder
 from data.episode_saver import EpisodeSaver
-from models.act_lerobot import ACTLeRobotConfig, ACTLeRobotPolicy
+from models.act_refactored import ACTLeRobotConfig, ACTLeRobotPolicy
 
 AGENT_POS_DIM = 2
 ENV_STATE_DIM = 16
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("model_path", "models/act_keypoints_250_epochs/latest.pt", "Path to pretrained 18-D keypoints ACT checkpoint")
+flags.DEFINE_string("model_path", "models/act_cr_dagger_keypoints/latest.pt", "Path to pretrained 18-D keypoints ACT checkpoint")
 flags.DEFINE_string("output_dir", "data/act_cr_dagger_keypoints", "Directory to save collected data")
 flags.DEFINE_integer("num_seeds", 50, "Number of seeds to collect")
 flags.DEFINE_integer("fps", 10, "Control frequency")
@@ -75,7 +75,7 @@ flags.DEFINE_integer("start_seed", 0, "Starting seed for deterministic sequences
 flags.DEFINE_boolean("random_seeds", True, "Sample random seeds instead of using start_seed sequence")
 flags.DEFINE_boolean("save_images", False, "Save image observations (default off; keypoints model is state-only)")
 flags.DEFINE_boolean("temporal_agg", True, "Enable temporal ensembling (query model every step, blend predictions)")
-flags.DEFINE_float("ensemble_decay", 0.05, "Override temporal ensembling decay; <0 uses checkpoint")
+flags.DEFINE_float("ensemble_decay", 0.1, "Override temporal ensembling decay; <0 uses checkpoint")
 flags.DEFINE_integer(
     "query_frequency",
     -1,

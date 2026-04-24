@@ -1,3 +1,7 @@
+"""Evaluation script for ACT in gym_pusht/PushT-v0.
+Run with:
+python scripts/act_eval.py --model_path=models/act_20/best.pt --num_seeds=100 --save_video=True"""
+
 import warnings
 from typing import Dict, List, Tuple
 
